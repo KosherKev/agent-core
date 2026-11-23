@@ -1,0 +1,1 @@
+{"schema_version":"1","name":"docs.write","version":"0.2.1","scopes":[],"inputs":[],"outputs":[],"undo":{"reversal_steps":["git revert the commit"]},"risk_tier":"medium"}

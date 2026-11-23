@@ -7,7 +7,7 @@
   "scripts": {
     "build": "node scripts/build-self-model.js",
     "check:self-model": "node scripts/build-self-model.js --check",
-    "test": "node --test test/ acceptance/"
+    "test": "node --test \"test/**/*.test.js\" \"acceptance/**/*.test.js\""
   },
   "engines": {
     "node": ">=20"
