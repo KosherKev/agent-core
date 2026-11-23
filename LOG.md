@@ -21,3 +21,25 @@
   - ajv pinned at 8.20.0 (8.17.1 had an npm audit advisory; not exploitable here as `$data` is unused).
 - Status: complete on branch task/contracts-and-schemas, awaiting review. Not merged.
 - Next step: Kevin reviews and merges; enable branch protection and CODEOWNERS review.
+
+## 2026-11-23 (guard and schema fixes)
+- Files touched: .github/scripts/locked-paths.mjs, .github/workflows/protect-locked-paths.yml, schemas/v1/{capability-manifest,extension-request}.schema.json, fixtures/{capability-manifest,extension-request}/invalid/ws-*.json (8 new), test/ci-locked-paths.test.js, test/whitespace-text.test.js, docs/adr/0003-run-journal.md (addendum), README.md, LOG.md
+- CHANGED LOCKED PATHS (review these first):
+  - .github/scripts/locked-paths.mjs (guard rewritten: --no-renames -z, agent detection removed)
+  - .github/workflows/protect-locked-paths.yml (guard job runs from base SHA, SHAs via env, agent env removed)
+  - acceptance/: no changes. .github/CODEOWNERS and .github/locked-paths.txt: no changes.
+- What changed: (1) guard checks both ends of renames and parses -z; (2) schemas reject whitespace-only button_ref, reversal_steps items, and extension-request undo_plan, why, proposed_approach, missing_capability via pattern "\S", with 8 whitespace-only invalid fixtures asserted to fail on the targeted pattern error; (3) workflow runs the base ref's guard against the PR head; (4) all agent detection removed, any locked-path change fails; (5) CLI tests on temp git repos: rename out of acceptance/, rename out of .github/, delete, add, plus a non-locked control; (6) README section, ADR-0003 addendum, this entry.
+- Acceptance criteria (pass/fail each):
+  - items 1-6 implemented: PASS
+  - npm test: PASS (89 tests, 0 failures; was 67); build and check:self-model: PASS; npm audit --omit=dev: 0 vulnerabilities
+  - new rename tests fail against the old guard (842760b), pass against the new: PASS
+  - whitespace-only rejected, valid fixtures pass: PASS
+  - workflow run on GitHub: NOT RUN (not allowed; logic unit/CLI tested only)
+- Deviations:
+  - Delete and add of locked files were already caught by the old guard (git diff --name-only lists them); only the two rename tests fail against it. The delete/add tests are regression coverage.
+  - ADR note is an addendum to ADR-0003 (it already references R4), not ADR-0006, to keep the one-ADR-per-contract test and self-model unchanged.
+  - acceptance/README.md (locked) still describes "agent-authored" detection and is now stale; not edited, to avoid changing another locked path. Kevin may update it.
+  - Observed, not fixed (out of scope): the guard's CLI entry check compares process.argv[1] to the module URL, so invoking it through a symlinked path (e.g. /tmp on macOS) silently exits 0 without checking. The workflow calls it by a plain path, so CI is unaffected.
+  - The guard cannot run from a base that lacks it, so the first PR into an empty main has no base to guard against.
+- Status: complete on branch task/contracts-and-schemas, awaiting review. Not merged.
+- Next step: Kevin reviews the locked-path changes above first, enables branch protection with this check and Code Owner review required, and merges manually.
