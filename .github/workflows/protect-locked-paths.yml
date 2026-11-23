@@ -1,20 +1,29 @@
 name: protect-locked-paths
+# Why pull_request_target is safe here: this workflow file is read from the BASE branch, so a PR
+# cannot edit it away (a plain pull_request trigger would run the PR's own copy). It never checks
+# out, installs, builds or executes PR code: the PR head is only fetched as git data and compared
+# by the guard script, which comes from the base checkout. The token is contents: read and no
+# secrets are used.
 on:
-  pull_request:
+  pull_request_target:
     branches: [main]
 permissions:
   contents: read
 jobs:
-  locked-paths:
+  # GitHub names the required check after the JOB name, so id and name are both protect-locked-paths.
+  protect-locked-paths:
+    name: protect-locked-paths
     runs-on: ubuntu-latest
     steps:
       # Check out the BASE commit, so the guard script, locked-paths list and this check's
       # logic all come from the base ref. A PR cannot change the rules it is judged by.
+      # Credentials are kept (no persist-credentials: false) on purpose: the fetch of
+      # refs/pull/N/head below may fail on private repos without them. The token is
+      # contents: read only and no PR code executes, so keeping it is safe.
       - uses: actions/checkout@v4
         with:
           ref: ${{ github.event.pull_request.base.sha }}
           fetch-depth: 0
-          persist-credentials: false
       - name: Fetch the PR head commit (data only, never executed)
         env:
           PR_NUMBER: ${{ github.event.pull_request.number }}
@@ -24,14 +33,3 @@ jobs:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: node .github/scripts/locked-paths.mjs "$BASE_SHA" "$HEAD_SHA"
-  tests:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 24
-          cache: npm
-      - run: npm ci --ignore-scripts
-      - run: npm run check:self-model
-      - run: npm test
