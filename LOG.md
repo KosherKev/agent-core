@@ -60,3 +60,20 @@
 - Status: complete on branch task/contracts-and-schemas, awaiting review. Not merged.
 - Next step: Kevin reviews the locked guard change first.
 
+## 2026-11-23 (guard workflow split)
+- Files touched: .github/workflows/protect-locked-paths.yml, .github/workflows/tests.yml (new), acceptance/contracts.test.js, acceptance/README.md, README.md (guard section and layout line), LOG.md
+- CHANGED LOCKED PATHS (review these first):
+  - .github/workflows/protect-locked-paths.yml (now pull_request_target on main, single job id and name protect-locked-paths, contents: read, base-sha checkout with credentials kept for the refs/pull/N/head fetch, tests job removed)
+  - .github/workflows/tests.yml (new: tests job moved here unchanged, plain pull_request, contents: read, no secrets)
+  - acceptance/contracts.test.js (old single-workflow assertion replaced by 3 workflow-layout tests)
+  - acceptance/README.md (guard fails ANY PR touching locked paths; agent-authored description removed)
+  - .github/scripts/locked-paths.mjs, .github/CODEOWNERS, .github/locked-paths.txt: no changes.
+- What changed: (1) guard job renamed so the required check is exactly protect-locked-paths; (2) guard in its own pull_request_target workflow so a PR cannot edit it away; (3) tests job in a separate pull_request workflow; (4) new acceptance tests (text-structure checks, no YAML parser dependency) for trigger, branches, job name, permissions, no PR code execution, and the separate tests workflow; README guard section updated to match.
+- Acceptance criteria (pass/fail each):
+  - npm test: PASS on Node 22 and Node 24 (111 tests, 0 failures each; was 109)
+  - build, check:self-model, npm audit --omit=dev (0 vulnerabilities): PASS
+  - new tests fail against the old single workflow (ffa8148), pass against the new layout: PASS
+  - workflow run on GitHub: NOT RUN (not possible locally)
+- Deviations: root README.md edited (two statements about the old workflow were factually wrong now); ADR-0003 addendum left as is (still accurate). tests.yml keeps node 24 and the old step order.
+- Status: complete on branch task/contracts-and-schemas, awaiting review. Not pushed, not merged.
+- Next step: Kevin reviews the locked-path changes above first, then pushes.
