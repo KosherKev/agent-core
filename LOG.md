@@ -1,5 +1,56 @@
 # LOG
 
+## 2026-11-23 (Ledger fix round)
+### What was done
+One commit per issue, only `src/ledger/`, ledger tests under `test/`, and this file changed.
+1. Report CLI entry (`src/ledger/report.js`): the entry check compared `import.meta.url` to `file://${resolve(argv[1])}` as strings, so a repo path with a space (URL-encoded `%20`) or a symlinked `argv[1]` made `npm run ledger:report` print nothing and exit 0, even on a corrupt ledger. Now `isCliEntry()` compares `realpathSync(resolve(argv[1]))` with `realpathSync(fileURLToPath(import.meta.url))`; if the comparison itself throws it answers "yes, I am the entry" (fail closed, the CLI runs); no `argv[1]` means imported. Any error in the CLI body prints `ledger:report: ERROR ...` and exits 1.
+2. Lock takeover (`src/ledger/lock.js`): the stale-lock logic is gone. An existing lock is never broken by code. A lock whose owner pid is dead refuses at once with the lock path and the exact command (`rm -r '<lock path>'`) to clear it by hand.
+3. Durability (`src/ledger/durable.js`, `ledger.js`, `lock.js`): every append checks the byte count (a short write is retried for the remainder; three zero-progress writes, a negative or too-large return, or a throw refuses); the file is fsynced after each append; the directory is fsynced when the append created the ledger file; for a lock, the owner file is fsynced, the temp dir is fsynced before the rename, and the parent directory after it. A failed fsync after the rename releases the lock and refuses. File operations are injectable through `openLedger(dir, { io: { writeSync, fsyncSync } })`.
+4. Operator errors (`lock.js`): a lock with a missing, unreadable, corrupt or malformed `owner.json`, and a live pid holding the lock longer than `lockMaxAgeMs` (default 300000 ms), refuse at once, naming the lock path, the pid and age where known, "NOT broken automatically", and the clearing command. A lock that merely looks ownerless because it is being released and re-taken is not misreported (see decisions).
+5. Event loop (`lock.js`): the wait was already `Atomics.wait` on a shared buffer, not a busy loop, so there was nothing to swap for async (and async would change the meter's calls, which are out of scope). Changed: one shared wait cell, and the sleep is capped at the remaining deadline, so a long `pollMs` can no longer overshoot `timeoutMs`. The thread still blocks during the wait (inherent to a synchronous API); the wait is bounded. Test: a 120 ms timeout with a 5000 ms poll refuses in well under 1.5 s without burning CPU.
+6. Cleanup: the release comment now states what is and is not protected; release verifies an owner token before renaming, so a lock cleared by hand and re-taken by another run is left alone; the stray `GENESIS` re-export (`index.js`, `ledger.js`) is removed (`format.js` still exports it for its own use); the `testHooks.betweenCheckAndAppend` hook is removed from production code, and `test/ledger-worker.js` now widens the race window through the injected `io.writeSync` instead.
+
+### Commands run and results (with counts)
+- Baseline, origin/main 74ca6d5, `npm test`: Node 22.23.5 340 tests, 340 pass, 0 fail, 0 skipped; Node 24.22.3 340 tests, 340 pass, 0 fail, 0 skipped.
+- Final: Node 22.23.5 362 tests, 362 pass, 0 fail, 0 skipped; Node 24.22.3 362 tests, 362 pass, 0 fail, 0 skipped (340 + 22 new, no test skipped or removed; one old test, "a stale lock from a dead pid is recovered", was replaced by "a dead-pid lock is never broken", because the behaviour it asserted is deliberately gone).
+- `npm run build` clean (self-model.json unchanged), `npm run check:self-model` passes, `npm audit --omit=dev` 0 vulnerabilities. No new dependencies.
+- Fail-before, in a scratch copy of origin/main under /private/tmp/ledger-fb (new tests copied onto the old `src/ledger`; the worktree was never broken):
+  - Report CLI: 5 of the 8 report tests fail on the old code (space path, symlink, space+symlink, unexpected error exit, `isCliEntry`); the 3 old report tests pass. All 8 pass now.
+  - Lock: against the old `lock.js`, the 3 dead-pid tests fail: the seeded dead-pid lock was taken over in 39 of 39 rounds (6 processes), 195 appends went through a dead-pid lock, and the real-ledger chain verified as forked in 3 of 3 runs. The 3 control/detector tests pass on both old and new code (they show the harness itself is sound). All 6 pass now.
+  - Multi-process lock test design (`test/ledger-lock.test.js`, `test/ledger-lock-worker.js`): 6 separate processes, 40 rounds, a start barrier per round, a pre-seeded dead-pid lock re-seeded every round; a critical section that detects any concurrent entry (mkdir of a marker directory, rmdir at exit); asserts zero entries, zero overlaps, lock left exactly as seeded, no appended entry, and a hash chain that still verifies. Controls: the same 6 processes x 40 rounds on a fresh lock never overlap and every one of the 240 appends is a valid link; a planted occupant is detected (proves the detector can fail).
+- Debugging notes: the first operator-error version misreported a healthy contended lock as "no owner.json" in a 5-process run (the instant between a release and the next take); fixed by identity check, below.
+
+### Decisions and why
+- What the earlier ledger section undersold about the lock race: it said a stale lock was "broken only if the owner pid is dead AND older than 30 s" and presented the recovery as safe. It was not. With three or more processes racing over a dead-pid lock, process A could move the lock aside, process B could then examine and move A's fresh replacement lock aside, and two processes ended up holding the lock at once. The outcome was not a clean refusal: both appended, the hash chain forked, and from then on every run on that grant refused until someone repaired the file by hand (reproduced here: forked chain in 3 of 3 runs on the old code). It failed closed in the sense that it could not overspend silently afterwards, but the first overlapping appends were already written.
+- Lock design, restrictive option: no automatic takeover of any existing lock. Argument: the only way two processes can both hold the lock is for the lock directory to be removed while its holder still believes it holds it. Acquire is a single atomic `rename(tmp, lock)` that cannot succeed over an existing non-empty directory, so at most one process creates the lock at a time. The only code that removes a lock is release, which renames aside only after checking the owner token equals the one this process wrote. No code path examines a foreign lock and then removes it, so there is no check-then-act step to race. The cost is that a crashed run needs a human to clear its lock.
+- A kept auto-recovery was considered and rejected: it would need an additional mutual-exclusion step to guard the takeover, which is the same problem again.
+- A lock that looks ownerless is only reported after the same directory (same device, inode and birth time, checked before and after the read) shows the bad owner three times with sleeps between; otherwise a lock being released and re-taken during heavy contention was misreported (this was seen once in the existing 5-process overspend test).
+- `lockStaleMs` is gone as an option (nothing is broken by age); `lockMaxAgeMs` is new and only turns a long wait on a live pid into an immediate refusal with instructions.
+- Short write: retry the remainder (the file is opened O_APPEND under the lock, so a retry continues the same line); refuse after three zero-progress writes. A refused short write can leave a partial last line; the next read then refuses as a torn line, with the existing hand-repair route.
+- The injected `io` parameter replaces the production test hook; it carries only the two functions the durability check needs.
+
+### What is NOT enforced after this task
+- A crashed run's lock needs a human; until cleared, that grant refuses (by design, loudly, with the command).
+- Release has a microsecond window between the owner-token check and the rename in which a hand-cleared lock re-taken by another run could be moved aside; it requires a manual clear while the original holder is still running.
+- fsync is requested but not proven durable against a lying disk or a filesystem that ignores fsync; macOS `fsync` does not force a drive cache flush (`F_FULLFSYNC` is not used; Node does not expose it).
+- Everything listed as not enforced in the earlier ledger section still holds (anyone with the user's filesystem access can rewrite the ledger; tail truncation is undetectable without an external anchor).
+- A pid reused by an unrelated live program makes a dead run's lock look alive until `lockMaxAgeMs`, then it refuses with instructions.
+
+### CHANGED LOCKED PATHS (expected: none)
+None. `git diff --name-only origin/main...HEAD` lists only `LOG.md`, `src/ledger/*` and `test/ledger*` files (see the final report for the list); nothing under src/grant/, src/builder-adapter.js, src/builder-confine.js, test/builder-mock.js, `.github/`, acceptance/, schemas/, CODEOWNERS, src/validators.js or config/.
+
+### Not verified
+- The `protect-locked-paths` guard on a real PR: not runnable here, unverified.
+- Power-loss durability itself: only that fsync is called on the right file descriptors (injected function), not that data survives a real power cut.
+- Behaviour on a case-sensitive Linux filesystem, a network filesystem, or Windows: not run. Inode identity checks rely on `dev:ino:birthtime` and were exercised on APFS only.
+- The race tests are probabilistic by nature on the old code (the failures were reproduced in every run done, but not for a fixed number of runs); on the new code they are deterministic refusals.
+
+### Open questions for Kevin
+- Dead-pid locks now always need a manual `rm -r`. Do you want an opt-in operator command (for example `npm run ledger:clear-lock -- <path>`) that verifies the pid is dead and removes the lock under a documented single-operator assumption? Not built: it is outside this spec and would be the first automatic takeover.
+- `lockMaxAgeMs` default is 5 minutes; a single ledger operation takes milliseconds. Shorter?
+- The meter (`src/grant/`, locked) maps any ledger lock failure to `GrantError('ledger')`; whether the adapter should show the operator the clearing command in its exit message was not touched (out of scope).
+- Should `F_FULLFSYNC`-grade durability on macOS be required? Node does not offer it; it would need a native step.
+
 ## 2026-11-23 (Per grant spend ledger)
 ### What was done
 - New `src/ledger/` (format.js, lock.js, ledger.js, report.js, index.js). Local append-only JSON-lines ledger, one file per grant, in `AGENT_LEDGER_DIR` (default `~/.agent-ledger`, refused if inside this repo, dir 0700, files 0600, a looser pre-existing dir is refused). Money is integer micro-USD. Entries: `open`, `reserve`, `settle`, `release`, `run_end`. Remaining = limit - settled - open reservations; a run with no `run_end` keeps its reservations counted. `max_tool_calls` is counted across runs (tool calls are `reserve` entries of kind `tool`).
