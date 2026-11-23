@@ -29,7 +29,7 @@ fixtures/<name>/  valid/ and invalid/ examples per schema
 test/             unit tests
 acceptance/       LOCKED acceptance suite
 docs/adr/         one ADR per contract
-.github/          CODEOWNERS, locked-paths list, CI workflow (LOCKED)
+.github/          CODEOWNERS, locked-paths list, guard workflow and tests workflow (LOCKED)
 scripts/          build-self-model.js
 self-model.json   generated; do not hand-edit
 ```
@@ -47,7 +47,7 @@ Dependencies are exact-pinned and locked in `package-lock.json`; install with `n
 Add `schemas/v2/` alongside `v1/`; never change a published version in a breaking way. Add valid and invalid fixtures and an ADR.
 
 ## Locked-path guard
-`.github/workflows/protect-locked-paths.yml` runs on `pull_request` and fails when a PR changes any path listed in `.github/locked-paths.txt`, whoever or whatever authored it. There is no agent detection (no branch prefix, actor or label logic).
+`.github/workflows/protect-locked-paths.yml` runs on `pull_request_target` (so the workflow file itself comes from the base branch and a PR cannot edit it away; it never executes PR code) and fails when a PR changes any path listed in `.github/locked-paths.txt`, whoever or whatever authored it. There is no agent detection (no branch prefix, actor or label logic).
 - The guard script and the locked-paths list are taken from the BASE commit (the workflow checks out the base SHA and only fetches the PR head as data), so a PR cannot edit the rules it is judged by.
 - The check diffs `base...head` with `--no-renames --name-only -z`: a rename counts as a delete of the old path plus an add of the new one, so both ends are checked, and paths are NUL-delimited so odd filenames cannot slip through.
 - The human exception is a manual merge by Kevin (the owner) after reviewing the locked-path changes. It is not a way for the check to pass.
