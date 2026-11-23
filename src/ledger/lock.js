@@ -24,7 +24,11 @@ export function acquireLock(lockPath, { now = Date.now, timeoutMs = 5000, staleM
       tmp = mkdtempSync(`${lockPath}.t-`);
       writeFileSync(join(tmp, 'owner.json'), JSON.stringify({ pid: process.pid, at_ms: now() }), { mode: 0o600 });
       renameSync(tmp, lockPath);
-      return () => { try { rmSync(lockPath, { recursive: true, force: true }); } catch { /* a stale lock would be recovered later or refused */ } };
+      // Release by renaming away first (atomic), then deleting: deleting in place could remove a successor's fresh lock.
+      return () => {
+        const gone = `${lockPath}.rel-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+        try { renameSync(lockPath, gone); rmSync(gone, { recursive: true, force: true }); } catch { /* a stale lock would be recovered later or refused */ }
+      };
     } catch (err) {
       if (tmp) { try { rmSync(tmp, { recursive: true, force: true }); } catch { /* ignore */ } }
       if (!['EEXIST', 'ENOTEMPTY', 'EISDIR', 'ENOTDIR'].includes(err.code)) throw new LedgerError('ledger', `ledger lock error (${err.code ?? 'unknown'}); refusing`);
