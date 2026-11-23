@@ -133,17 +133,20 @@ const canonical = [
 const hostile = [
   'Acceptance/x', 'ACCEPTANCE/x', '.GITHUB/x', '.Github/workflows/x.yml', 'accept\u200bance/x', './acceptance/x', 'acceptance//x', 'acceptance/./x',
   '.github /x', '.github./x', 'acceptance',
+  'docs/CODEOWNER\u017f', 'sub/.GitAttributes', '.git~1/x', 'a/.gitmodules',
 ];
 
 test('shared corpus: on canonical paths the adapter check and the guard agree on locked vs not', () => {
   for (const p of canonical) assert.equal(isLockedPath(p, guardLocked), isLocked(p, guardLocked), p);
 });
 
-test('shared corpus: every path the guard locks is refused by the adapter; hostile spellings the guard does not fold are refused too', () => {
+test('shared corpus: every path the guard locks is refused by the adapter, and the adapter and guard agree on hostile spellings', () => {
   for (const p of [...canonical, ...hostile]) if (isLocked(p, guardLocked)) assert.equal(isLockedPath(p, guardLocked), true, `guard locks ${p}`);
+  // The guard folds the same spellings as the adapter (case, unicode, invisible characters, trailing dots and spaces, .git-like names), so neither side locks anything the other leaves open.
   const adapterOnly = hostile.filter((p) => isLockedPath(p, guardLocked) && !isLocked(p, guardLocked));
-  // These are the spellings that resolve to a locked path on a case/normalisation-insensitive filesystem; the guard is exact-match, the adapter folds.
-  assert.deepEqual(adapterOnly.sort(), ['.GITHUB/x', '.Github/workflows/x.yml', 'ACCEPTANCE/x', 'Acceptance/x', 'accept\u200bance/x', '.github /x', '.github./x', './acceptance/x', 'acceptance'].sort());
+  assert.deepEqual(adapterOnly, []);
+  const guardOnly = hostile.filter((p) => isLocked(p, guardLocked) && !isLockedPath(p, guardLocked));
+  assert.deepEqual(guardOnly, []);
   for (const p of hostile) assert.equal(isLockedPath(p, guardLocked), true, p);
 });
 
