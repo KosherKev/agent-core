@@ -17,8 +17,8 @@
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "button_ref": { "type": "string", "minLength": 1 },
-        "reversal_steps": { "type": "array", "minItems": 1, "items": { "type": "string", "minLength": 1 } }
+        "button_ref": { "type": "string", "minLength": 1, "pattern": "\\S" },
+        "reversal_steps": { "type": "array", "minItems": 1, "items": { "type": "string", "minLength": 1, "pattern": "\\S" } }
       },
       "anyOf": [{ "required": ["button_ref"] }, { "required": ["reversal_steps"] }]
     },

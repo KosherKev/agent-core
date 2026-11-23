@@ -1,0 +1,1 @@
+{"schema_version":"1","missing_capability":"calendar.read","why":"Cannot check availability","proposed_approach":"Add read-only calendar module behind a manifest","scopes_wanted":["calendar:read"],"undo_plan":{"reversal_steps":["  "]}}

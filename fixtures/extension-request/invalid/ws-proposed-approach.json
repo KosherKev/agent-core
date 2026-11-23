@@ -1,0 +1,1 @@
+{"schema_version":"1","missing_capability":"calendar.read","why":"Cannot check availability","proposed_approach":" ","scopes_wanted":["calendar:read"],"undo_plan":{"reversal_steps":["Revert the module commit","Revoke calendar:read"]}}

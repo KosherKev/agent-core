@@ -1,0 +1,1 @@
+{"schema_version":"1","name":"repo.open-pr","version":"1.0.0","scopes":["repo:write"],"inputs":[{"name":"branch","type":"string","required":true}],"outputs":[{"name":"pr_url","type":"string"}],"undo":{"reversal_steps":["  "]},"risk_tier":"low"}
