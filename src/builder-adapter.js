@@ -14,7 +14,7 @@ export const EXIT = Object.freeze({ OK: 0, FAILED: 1, REFUSED: 2, RATE_LIMITED: 
 export const LIMITS = Object.freeze({ MAX_MALFORMED_IN_ROW: 3, MAX_TRUNCATIONS: 1, MAX_FILE_BYTES: 200000, MAX_READ_BYTES: 50000 });
 const PROTECTED_BRANCHES = new Set(['main', 'master', 'develop']);
 
-/** Where the contract was awkward for this builder. Journaled once per run as issues of kind `contract-gap` (13 gaps; the self-model field gap is added separately). */
+/** Where the contract was awkward for this builder. Journaled once per run as issues of kind `contract-gap` (14 entries: the 8 first logged, 5 found by review, and the self-model capabilities field). */
 export const CONTRACT_GAPS = Object.freeze([
   { file: 'schemas/v1/run-journal-entry.schema.json', reason: 'issue entries have no `kind` field (category is bug/risk/improvement and unevaluatedProperties is false), so rate-limit and contract-gap kinds are encoded as a "[kind: X]" prefix in the description.' },
   { file: 'schemas/v1/run-journal-entry.schema.json', reason: 'there is no failure entry kind; failures are recorded as an `attempt` with outcome "failed" (or "blocked").' },
@@ -29,6 +29,7 @@ export const CONTRACT_GAPS = Object.freeze([
   { file: 'schemas/v1/grant.schema.json', reason: 'allowed_risk_tiers has no defined meaning or ordering for a builder; the adapter only checks that "low" is included, and does not compare per-capability risk tiers against the list.' },
   { file: 'schemas/v1/capability-manifest.schema.json', reason: 'scopes are free-form strings with no vocabulary, so the adapter invented its own scope strings (for example repo:write:task-worktree) that nothing else can interpret or check against a grant.' },
   { file: 'schemas/v1/run-journal-entry.schema.json', reason: 'a model refusal and a truncated response have no representation in the contract; they are journaled as an attempt (blocked or failed) plus an issue with a "[kind: refusal]" or "[kind: truncation]" prefix.' },
+  { file: 'schemas/v1/self-model.schema.json', reason: 'the self-model schema and generator (scripts/build-self-model.js) have no field for adapter capabilities, so builder modules are listed without their capabilities. Not extended in this task; Kevin decides whether to add the field.' },
 ]);
 
 const SYSTEM_PROMPT = [
