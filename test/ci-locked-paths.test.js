@@ -189,7 +189,7 @@ test('guard fail-closed: bad SHA exits non-zero', () => {
   try {
     const r = runRaw(dir, [base, '0123456789abcdef0123456789abcdef01234567']);
     assert.notEqual(r.status, 0, r.stdout + r.stderr);
-    assert.match(r.stderr, /guard|git|fail/i);
+    assert.match(r.stderr, /FAILED CLOSED/);
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 test('guard fail-closed: non-hex / option-looking ref exits non-zero', () => {
@@ -221,6 +221,7 @@ test('guard fail-closed: unexpected git output exits non-zero', () => {
     const head = git(dir, 'rev-parse', 'HEAD');
     const r = runRaw(dir, [base, head], { PATH: bin + ':' + process.env.PATH });
     assert.notEqual(r.status, 0, r.stdout + r.stderr);
+    assert.match(r.stderr, /FAILED CLOSED.*unexpected git output/);
   } finally { rmSync(dir, { recursive: true, force: true }); rmSync(bin, { recursive: true, force: true }); }
 });
 test('guard fail-closed: git binary failing exits non-zero', () => {

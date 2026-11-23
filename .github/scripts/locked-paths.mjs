@@ -121,14 +121,26 @@ export function lockedViolations(entries, locked, headTree, baseTree, readEntry)
 
 // CLI: node locked-paths.mjs <base-sha> <head-sha>
 // Any change to a locked path fails, whoever authored it. The human exception is a manual merge by the owner.
-if (process.argv[1] === fileURLToPath(import.meta.url)) {
+// Fail closed: any error, unexpected git output or unresolvable path exits non-zero, never 0.
+function main() {
   const [base, head] = process.argv.slice(2);
-  if (!base || !head) { console.error('usage: locked-paths.mjs <base> <head>'); process.exit(2); }
-  const locked = parseLocked(readFileSync(new URL('../locked-paths.txt', import.meta.url), 'utf8'));
-  const bad = lockedViolations(rawChanges(base, head), locked, head, base);
-  if (bad.length) {
-    console.error('Change touches locked paths (R4):\n' + bad.map((f) => `  ${f}`).join('\n'));
-    process.exit(1);
+  if (!base || !head) { console.error('usage: locked-paths.mjs <base> <head>'); return 2; }
+  for (const ref of [base, head]) {
+    if (!/^[0-9a-fA-F]{7,64}$/.test(ref)) { console.error(`locked-paths guard FAILED CLOSED: not a commit SHA: ${JSON.stringify(ref)}`); return 2; }
   }
-  console.log('no locked paths touched');
+  try {
+    const locked = parseLocked(readFileSync(new URL('../locked-paths.txt', import.meta.url), 'utf8'));
+    if (!locked.length) throw new Error('locked-paths.txt lists no paths');
+    const bad = lockedViolations(rawChanges(base, head), locked, head, base);
+    if (bad.length) {
+      console.error('Change touches locked paths (R4):\n' + bad.map((f) => `  ${f}`).join('\n'));
+      return 1;
+    }
+    console.log('no locked paths touched');
+    return 0;
+  } catch (err) {
+    console.error(`locked-paths guard FAILED CLOSED: ${err.message}`);
+    return 2;
+  }
 }
+if (process.argv[1] === fileURLToPath(import.meta.url)) process.exit(main());
