@@ -1,6 +1,21 @@
 import { readFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 
+const LOOPBACK_HOSTS = new Set(['127.0.0.1', '[::1]', 'localhost']);
+export const isLoopbackHost = (hostname) => LOOPBACK_HOSTS.has(String(hostname).toLowerCase());
+
+/**
+ * The API key travels as a Bearer header, so the base URL must be https. The one explicit exception is an
+ * http loopback host (127.0.0.1, ::1, localhost) so the test mock server works; it can never leave the machine.
+ */
+export function checkBaseUrl(baseUrl) {
+  let u;
+  try { u = new URL(baseUrl); } catch { return { ok: false, why: 'base_url must be a valid URL' }; }
+  if (u.protocol === 'https:') return { ok: true };
+  if (u.protocol === 'http:' && isLoopbackHost(u.hostname)) return { ok: true, loopback: true };
+  return { ok: false, why: 'base_url must be https (plain http is allowed only for 127.0.0.1, ::1 or localhost)' };
+}
+
 export class ConfigError extends Error {
   constructor(message) { super(message); this.name = 'ConfigError'; }
 }
@@ -64,8 +79,9 @@ export function loadConfig({ env = process.env, cwd = process.cwd(), file } = {}
   const baseUrl = env.AGENT_BUILDER_BASE_URL || local.base_url || DEFAULTS.base_url;
   let u;
   try { u = new URL(baseUrl); } catch { throw new ConfigError('base_url must be a valid URL'); }
-  if (u.protocol !== 'https:' && u.protocol !== 'http:') throw new ConfigError('base_url must be http(s)');
   if (u.username || u.password) throw new ConfigError('base_url must not embed credentials');
+  const secure = checkBaseUrl(baseUrl);
+  if (!secure.ok) throw new ConfigError(secure.why);
 
   const role = validateRole(env.AGENT_BUILDER_ROLE ?? local.role ?? DEFAULTS.role);
 

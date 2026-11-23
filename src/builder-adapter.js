@@ -4,7 +4,7 @@ import { dirname, join, basename } from 'node:path';
 import { randomBytes } from 'node:crypto';
 import { createJournal } from './journal.js';
 import { validateGrant } from './validators.js';
-import { isFreeModel } from './builder-config.js';
+import { isFreeModel, checkBaseUrl } from './builder-config.js';
 import { makeRedactor, redactError } from './builder-redact.js';
 import { confine, ConfineError, isReadDenied } from './builder-confine.js';
 import { BUILDER_CAPABILITIES, validateCapabilities } from './builder-capabilities.js';
@@ -154,6 +154,8 @@ export async function runBuilder({ config, task }, opts = {}) {
     for (const g of CONTRACT_GAPS) issue('contract-gap', 'improvement', 'low', `${g.file}: ${g.reason}`, 'Decide whether to extend the contract in a new schema version; the adapter works around it for now.');
 
     if (config.role !== 'builder') return refuse('role is not builder');
+    const bu = checkBaseUrl(config.base_url);
+    if (!bu.ok) return refuse(bu.why);
     if (!config.apiKey) return refuse('OPENROUTER_API_KEY is not set');
     if (!task || typeof task.goal !== 'string' || !task.goal.trim() || typeof task.repo !== 'string' || !task.repo.trim() || !workdir) return refuse('task needs repo, goal, grant and workdir');
     const repoName = basename(task.repo.replace(/\/+$/, ''));
@@ -339,6 +341,7 @@ async function requestModel({ config, messages, fetchFn, sleep, rec, redact, ste
         method: 'POST',
         headers: { 'content-type': 'application/json', authorization: `Bearer ${config.apiKey}` },
         body: JSON.stringify(body),
+        redirect: 'error',
         signal: AbortSignal.timeout(config.request_timeout_ms),
       });
       text = await res.text();
