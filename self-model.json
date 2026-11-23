@@ -2,6 +2,26 @@
   "schema_version": "1",
   "modules": [
     {
+      "name": "builder-adapter",
+      "path": "src/builder-adapter.js"
+    },
+    {
+      "name": "builder-capabilities",
+      "path": "src/builder-capabilities.js"
+    },
+    {
+      "name": "builder-config",
+      "path": "src/builder-config.js"
+    },
+    {
+      "name": "builder-confine",
+      "path": "src/builder-confine.js"
+    },
+    {
+      "name": "builder-redact",
+      "path": "src/builder-redact.js"
+    },
+    {
       "name": "journal",
       "path": "src/journal.js"
     },

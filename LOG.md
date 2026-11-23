@@ -77,3 +77,143 @@
 - Deviations: root README.md edited (two statements about the old workflow were factually wrong now); ADR-0003 addendum left as is (still accurate). tests.yml keeps node 24 and the old step order.
 - Status: complete on branch task/contracts-and-schemas, awaiting review. Not pushed, not merged.
 - Next step: Kevin reviews the locked-path changes above first, then pushes.
+
+# LOG - Spec C
+
+(New top-level section: the existing LOG.md history above is kept; entries there are per-task dated notes, this one follows the Spec C template.)
+
+## What was done
+Built the OpenRouter builder adapter in agent-core, items 1-6 of the spec, in new files only.
+1. Config: `src/builder-config.js` (loader, `ConfigError`), `src/builder-redact.js`. Env, optional untracked `.agent-builder.local.json` (added to `.gitignore` with `.agent-runs/`), defaults per spec. API key env only (a key-like field in the file is an error), attached as a non-enumerable property, redacted from journal, errors, stacks and commits. Provider prefs passthrough. `FREE_MODEL_REPO_ALLOWLIST` default `["agent-core"]`. `role` accepts only `builder`.
+2. Adapter: `src/builder-adapter.js` (tool loop on built-in fetch, no new dependencies), `src/builder-confine.js` (path confinement), `src/builder-capabilities.js` (4 manifests, all with undo, validated with the existing validator). Journal entries (reservation, attempt, issue) go through `createJournal().append`.
+3. Rate limits: 429 or daily-cap error handled with bounded backoff, then a clean stop (see RATE-LIMIT BEHAVIOUR).
+4. Tests: `test/builder-config.test.js` (7) and `test/builder-adapter.test.js` (25) with `test/builder-mock.js`, a local mock server on 127.0.0.1 with an ephemeral port. Two model IDs both complete; mocks for 429, malformed tool calls, refusal, truncation, 404 model-not-found.
+5. `npm run builder:smoke` (`scripts/builder-smoke.js`): runs one tiny task in a throwaway local clone against the real endpoint. NOT RUN by this task.
+6. Contract gaps journaled at runtime as issues of kind `contract-gap` and listed below.
+Also: self-model regenerated (the generator indexes top-level `src/*.js`, so the adapter files are flat `src/builder-*.js` rather than `src/builder/`); README section.
+
+## Commands run and results (with counts)
+- Baseline on origin/main (de64e51): 111 tests (not re-run before changes; `npm ci --ignore-scripts` clean, 0 vulnerabilities).
+- `npm test` Node 22.23.5: 143 tests, 143 pass, 0 fail, 0 skipped (111 + 7 config + 25 adapter).
+- `npm test` Node 24.22.3: 143 tests, 143 pass, 0 fail, 0 skipped.
+- `npm run build`: wrote self-model.json (8 modules, 5 contracts, 5 ADRs). `npm run check:self-model`: up to date.
+- `npm audit --omit=dev`: 0 vulnerabilities.
+- `git diff --name-only origin/main...HEAD`: no path under acceptance/, .github/, schemas/, or src/validators.js.
+- Local guard dry-run `node .github/scripts/locked-paths.mjs <origin/main sha> <HEAD sha>`: exit 0.
+- Not run, by design: `npm run builder:smoke`, any real network call, any real key.
+
+## Decisions and why
+- Task shape: the contract has no task-spec schema, so a task is `{repo, goal, grant, workdir, branch?}` with `grant` validated by the existing grant validator (see gaps). Grant scope, `max_tool_calls`, `expires_at` and risk tier low are enforced before any network call.
+- Exit codes: 0 ok, 1 failed (model not found, refusal, truncation twice, malformed x3, budget, HTTP/network error), 2 refused before any network call (config, allowlist, expired grant, protected branch), 3 rate-limited.
+- The adapter refuses to build on main/master/develop or detached HEAD, and commits only the files the model wrote, by explicit path.
+- Truncation: the cut-off reply is discarded and the model is told once to use smaller steps; a second truncation stops. Malformed tool call: error returned to the model; 3 in a row stops.
+- Flat file layout `src/builder-*.js` so the existing self-model generator lists the adapter without changing it.
+- Key safety: key is never put in an entry; every string is additionally passed through a redactor (exact key, `sk-or-...` shape, `Bearer ...`) before append, commit message, tool reply or thrown error; stacks are rebuilt redacted (UNVERIFIED beyond the one thrown-error test; see fix round).
+
+## CONTRACT GAPS (file, what was awkward, how it was handled)
+- schemas/v1/run-journal-entry.schema.json: issue entries have no `kind` field (category is bug/risk/improvement, unevaluatedProperties false). Handled: description prefixed `[kind: rate-limit]`, `[kind: contract-gap]`, etc., with the nearest category (rate-limit=risk, contract-gap=improvement).
+- schemas/v1/run-journal-entry.schema.json: no failure entry kind. Handled: `attempt` with outcome `failed` or `blocked`.
+- schemas/v1/grant.schema.json: no task-spec schema (no goal, repo identity, branch). Handled: adapter wrapper object, grant validated only.
+- schemas/v1/grant.schema.json: `scope.paths` semantics unspecified. Handled: relative prefixes; `.`, `*`, `**` mean all.
+- docs/adr/0003-run-journal.md (src/journal.js): guarantee is in-process only. Handled: adapter mirrors entries to untracked `.agent-runs/<run_id>.jsonl` (no append-only protection on that file).
+- src/self-model.js: only indexes top-level `src/*.js`, no capabilities field, so builder capabilities are not listed in self-model.json (modules are). Not changed.
+- schemas/v1/capability-manifest.schema.json: no registry/publication place for manifests. Handled: validated and written to `.agent-runs/<run_id>.capabilities.json`.
+- No role concept anywhere in the contract; R2 for this builder is enforced by the adapter config only.
+All of the above are journaled as `contract-gap` issues in every run. [CORRECTION, fix round: this was wrong. The role gap was in this list but not journaled (7 of 8). Fixed; see the fix-round section below.]
+
+## RATE-LIMIT BEHAVIOUR (documented exit code, backoff bounds)
+- Exit code 3 (`EXIT.RATE_LIMITED`).
+- Trigger: HTTP 429, or any error body mentioning a per-day/daily cap.
+- Wait: the `Retry-After` header (seconds or HTTP date) if present, else exponential `base_delay_ms * 2^n` (1s, 2s, 4s), capped at `max_delay_ms` (30s). Defaults: `max_retries` 3, so at most 4 requests per step and 7s to 90s of waiting. Configurable only inside bounds: max_retries 0-5, max_delay_ms up to 120000.
+- Stops immediately (no waiting) on a daily cap or a `Retry-After` above `max_delay_ms`.
+- On stop: attempt entry (blocked), issue `[kind: rate-limit]` (risk/medium), work so far committed on the branch, status `rate-limited`.
+- Model not found (404 or equivalent) is a journaled failed attempt, exit 1, no throw.
+
+## CHANGED LOCKED PATHS (expected: none)
+None. `git diff --name-only origin/main...HEAD` lists only: .gitignore, LOG.md, README.md, package.json, scripts/builder-smoke.js, self-model.json, src/builder-*.js (5 files), test/builder-*.js (3 files).
+
+## Open questions for Kevin
+- Template conflict: the existing LOG.md uses dated per-task entries; this Spec C section follows the template exactly and is appended.
+- Should the contract gain a task-spec schema, an issue `kind` field and a failure entry kind (new schema version)?
+- The smoke script clones this repo locally and works in a temp dir; confirm that is the low-risk public-repo task you wanted (it makes no push).
+- `particle-ai/particle-1:free` could not be verified (no network); the id is config only.
+
+## Run-journal issues raised
+Per run, the adapter journals: one reservation (free/third-party model data policy doubt); one `[kind: contract-gap]` issue per gap above (7 at first pass; now 14, see fix-round section); `[kind: rate-limit]` on a rate-limit stop; `[kind: refusal]`, `[kind: truncation]`, `[kind: malformed-tool-calls]` when those stop a run. Entries are only produced when the adapter runs; none were produced against any real endpoint during this task.
+
+# LOG - Spec C fix round
+
+Fixes the standards-review findings on 56f4ad2 (see `.agents/specs/failed/TASK_SPEC-openrouter-builder-adapter-2026-11-23T0904-a3c66b.md` in the orchestrator repo). Same branch, one commit per issue, new commits on top of 56f4ad2. The "LOG - Spec C" section above is the first-pass log; where it differs from this section, this section is the current truth (the first-pass section was not rewritten, corrections are listed below).
+
+## What was done
+1. Path-lock hardening (`src/builder-confine.js`, `test/builder-confine.test.js`). One shared check for every path the tools can touch, failing closed on any error: realpath (symlinks followed, canonical case via `realpathSync.native`) and the lexical path are both checked; segments are folded (NFD, ignorable zero-width/soft-hyphen characters removed, NFC, lower case, trailing dots/spaces stripped) before comparing; `..`, absolute paths, leading `~`, NUL, backslash refused; any `.git`-like segment refused (`.git`, `.GIT`, `.git `, `.git.`, `.git~1`, `GIT~1`, `.gitmodules`, `.gitattributes`, ignorable-char spellings), for reads and writes. Locked: acceptance/, .github/ (holds the guard script and CODEOWNERS), any file named CODEOWNERS, src/validators.js, .git/, .agent-runs/, .agent-builder.local.json, plus whatever `.github/locked-paths.txt` lists. package.json is not locked. `confineMove(root, from, to)` checks both ends of a rename or move. Reproduced reviewer finding: `.GIT/config` write is now refused (end-to-end test with a hostile fsmonitor config; `.git/config` is byte-identical afterwards).
+2. Allowlist from the git remote (`remoteRepos`, `parseGithubRemote` in `src/builder-adapter.js`). For a `:free` model every remote of the workdir (fetch and push URLs) must parse as GitHub https, scp-style ssh or ssh:// and be on `FREE_MODEL_REPO_ALLOWLIST`; `task.repo` is ignored for that decision. No remote, unparseable remote, userinfo in the URL, a workdir that is not its repo's top level, or any git error refuses. Runs in preflight, before any request. `scripts/builder-smoke.js` now sets the clone's origin to this repo's own remote URL so a `:free` smoke run is not refused.
+3. Read denylist (`isReadDenied`, `confine`). Refused: `.env*`, `.git` contents, `.ssh`, `.aws`, `.gnupg`, `.kube`, `.docker`, `~`-relative paths, anything outside the workdir (including via symlinks), `*.pem *.key *.crt *.cer *.p12 *.pfx *.der *.jks *.keystore *.asc *.gpg *.ppk`, `id_*`, `.netrc .npmrc .pypirc .pgpass .git-credentials`, `.agent-builder.local.json`, `.agent-runs`, and any name containing token, credential, secret, password, apikey, private-key. Refusals are `attempt` entries with outcome `failed`, never crashes. `list_dir` hides denied names. Reads now open the file, require a regular file, and read at most 50000 bytes (no whole-file read, no FIFO hang).
+4. https enforcement (`checkBaseUrl` in `src/builder-config.js`). Base URL must be https; plain http only for 127.0.0.1, `[::1]`, localhost (exact hostnames). Checked at config load and again in adapter preflight (hand-built config). Requests use `redirect: 'error'`.
+5. Journal correctness (`CONTRACT_GAPS`). 8 first-pass gaps now all journaled (the role gap was missing), plus 5 reviewer gaps (max_usd unenforced, expires_at start-only, risk tiers only checks low, ad-hoc scope strings, refusal/truncation unrepresented).
+6. Self-model: generator and schema NOT extended. The missing capabilities field is journaled as one more `contract-gap`.
+
+## Commands run and results (with counts)
+- Baseline at 56f4ad2: 143 tests.
+- New tests: 13 (confine) + 8 (allowlist) + 3 (read denylist) + 4 (https) + 2 (gaps) = 30; total 173.
+- `npm test` Node 22.23.5: 173 tests, 173 pass, 0 fail, 0 skipped (143 + 30 new).
+- `npm test` Node 24.22.3: 173 tests, 173 pass, 0 fail, 0 skipped.
+- `npm run build`: wrote self-model.json (8 modules, 5 contracts, 5 ADRs), no diff. `npm run check:self-model`: up to date.
+- `npm audit --omit=dev`: 0 vulnerabilities.
+- `git diff --name-only origin/main...HEAD` (and against the local `main`, which is ahead of origin/main): no path under acceptance/, .github/, schemas/, CODEOWNERS or src/validators.js.
+- Local guard dry run `node .github/scripts/locked-paths.mjs <origin/main> <HEAD>`: exit 0 ("no locked paths touched").
+- Not run, by design: `npm run builder:smoke`, any live network call, any real key.
+
+## Decisions and why (restrictive choices made without asking)
+- Locked set follows this spec (acceptance/, .github/, CODEOWNERS, guard, src/validators.js), not only `.github/locked-paths.txt`, which today lists just acceptance/ and .github/. A file named CODEOWNERS is locked at any depth.
+- The guard (`.github/scripts/locked-paths.mjs`) exports `isLocked` but it is an exact-string prefix match with no case, unicode or `.git` handling, so it cannot be reused for normalisation. The adapter check is its own implementation, and `test/builder-confine.test.js` runs a shared corpus through both: on canonical paths they agree; every guard-locked path is refused by the adapter; the adapter additionally refuses the exact list of spellings the guard does not fold (case variants, zero-width characters, `./acceptance/x`, trailing dot/space, the bare name `acceptance`). The guard was not edited.
+- The write allowed-path (grant) check is exact-case on both the lexical and the real path, so `DOCS/x.md` is refused under a `docs/` grant even on a case-insensitive filesystem.
+- All spellings of `.gitmodules` and `.gitattributes` are treated as git internals, and `.git`-like segments are refused for reads as well as writes.
+- Read-denylist matches are deliberately broad (any name containing "token", "secret", "credential", "password"); this will refuse some harmless docs. False positives are cheaper than leaks.
+- Denylist and git refusals on reads are `attempt` outcome `failed` (spec wording); lock and grant refusals on writes stay `blocked` as before.
+- `:free` allowlist entries compare by repo name, case-insensitive (the spec says "list of repo names"). An entry may also be written `owner/repo`. The default stays `agent-core` by name only, so a fork `someoneelse/agent-core` would also pass; see Open questions.
+- Every remote (fetch and push, all URLs) must be allowlisted, not just `origin`, so a second private remote cannot ride along.
+- Spec item 4's last clause ("refused when the model ID is `:free` against a non-loopback host") is read as: non-https is refused for every non-loopback host including `:free` models; https hosts are allowed. A `:free` model against loopback http works only for the mock server.
+- No `move_file` tool was added; `confineMove` exists and is tested for any future move/rename tool.
+- No new dependencies.
+
+## CONTRACT GAPS (all 13 plus the self-model gap)
+All 14 are journaled at runtime on every run as `[kind: contract-gap]` issues (proved by `test/builder-gaps.test.js`).
+First pass, 8 (the first-pass LOG said all 8 were journaled; only 7 were, the role gap was missing and is now fixed):
+1. schemas/v1/run-journal-entry.schema.json: issue entries have no `kind` field.
+2. schemas/v1/run-journal-entry.schema.json: no failure entry kind (failures are `attempt` failed/blocked).
+3. schemas/v1/grant.schema.json: no task-spec schema.
+4. schemas/v1/grant.schema.json: `scope.paths` semantics unspecified.
+5. docs/adr/0003-run-journal.md: journal guarantee is in-process only.
+6. src/self-model.js: indexes only top-level `src/*.js`.
+7. schemas/v1/capability-manifest.schema.json: no registry for manifests.
+8. schemas/v1/ (all): no role concept (builder vs overseer, R2).
+Found by the reviewers, 5:
+9. grant.schema.json: `budget.max_usd` cannot be enforced (no metering).
+10. grant.schema.json: `expires_at` checked only at start; no mid-run or wall-clock expiry.
+11. grant.schema.json: `allowed_risk_tiers` has no defined semantics; adapter only checks `low`.
+12. capability-manifest.schema.json: `scopes` are free-form strings; adapter invented its own.
+13. run-journal-entry.schema.json: refusal and truncation have no representation.
+Self-model:
+14. schemas/v1/self-model.schema.json and scripts/build-self-model.js: no field for adapter capabilities. NOT extended; Kevin decides. (Gap 6 is the related but different "only indexes top-level src/*.js" point.)
+
+## CHANGED LOCKED PATHS (expected: none)
+None. `git diff --name-only main...HEAD` lists no file under acceptance/, .github/, CODEOWNERS, schemas/, or src/validators.js (checked, see below).
+
+## Not verified (guard on a real PR, live endpoint)
+- The `protect-locked-paths` workflow on a real PR: not run (no PR; not possible locally). Only the guard script was dry-run locally.
+- The live OpenRouter endpoint, the `particle-ai/particle-1:free` model ID, and its real response shapes: never contacted. `builder:smoke` not run. No real key was used.
+- Behaviour on a case-insensitive filesystem is exercised by the folding tests (which pass on any filesystem) and by the real APFS volume this was run on; a case-sensitive Linux run was not done.
+- 8.3 short-name (`.git~1`, `GIT~1`) and trailing-dot/space handling is refused by name; it was not tested against an NTFS volume.
+- First-pass LOG claims not proved by a test, now marked unverified: "stacks are rebuilt redacted" is only tested through the thrown-error path with a stack containing the key (test "a network error whose message contains the key"), not for every error path; "mock server records zero requests" is proved only for the preflight refusals listed in tests; "the smoke script makes no push" is by inspection, not by a test.
+
+## Open questions for Kevin
+- Allowlist is by repo name, so a fork `other-owner/agent-core` would pass. Should the default become `KosherKev/agent-core` (owner/repo entries are already supported)? Restrictive choice not taken because the spec fixes the default to `agent-core`.
+- Read denylist breadth (names containing token/secret/credential/password) may block legitimate docs; loosen?
+- Should `.gitignore` / `.gitattributes` / `.gitmodules` writes ever be allowed to a builder? Currently `.gitattributes` and `.gitmodules` are refused, `.gitignore` is allowed.
+- Should the contract gain a role concept, an issue `kind`, a failure entry, metering for `max_usd`, a self-model capabilities field (gaps above)?
+- The first-pass review also listed LOW findings not in this spec's scope and left open: `.agent-runs` is written before the role/branch/allowlist checks, `git add` fails the batch on a gitignored file, an unchanged write reports "completed" with no commit, the `/per[- ]day|daily/` match also applies to non-429 bodies, no wall-clock cap, unbounded response body size, redaction covers only the exact key, `sk-or-...` and `Bearer ...` shapes, test temp dirs are not cleaned up.
+- builder:smoke is safe to run only after Kevin reviews this fix round; the command-execution path (`.GIT/config`) is closed and tested, but the guard check on a real PR is still unverified.
+
+## Run-journal issues raised
+Per run, the adapter journals one reservation (free/third-party model data policy), 14 `[kind: contract-gap]` issues, and on the relevant stops `[kind: rate-limit]`, `[kind: refusal]`, `[kind: truncation]`, `[kind: malformed-tool-calls]`. Read-denylist and git-internals refusals are `attempt` entries, not issues. No entries were produced against a real endpoint during this task.
