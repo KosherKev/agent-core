@@ -1,4 +1,5 @@
 import { mkdtempSync, writeFileSync, readFileSync, renameSync, rmSync } from 'node:fs';
+import { randomBytes } from 'node:crypto';
 import { join } from 'node:path';
 import { LedgerError } from './format.js';
 
@@ -11,45 +12,41 @@ export function defaultPidAlive(pid) {
 
 const readOwner = (lockPath) => { try { return JSON.parse(readFileSync(join(lockPath, 'owner.json'), 'utf8')); } catch { return null; } };
 
+const clearCommand = (lockPath) => `rm -r '${String(lockPath).replace(/'/g, `'\\''`)}'`;
+
 /**
  * Exclusive lock = a directory that appears atomically with its owner file already inside (built in a temp dir, then renamed
- * into place; rename onto an existing non-empty directory fails). Waits a bounded time. Breaks a lock only if its owner pid is
- * dead AND the lock is older than staleMs; a live pid's lock is never broken. Any timeout or error throws (refuse).
+ * into place; rename onto an existing non-empty directory fails, so at most one process can ever create it).
+ *
+ * This code NEVER breaks a lock that exists. A lock whose owner pid is dead is refused at once with the exact command an
+ * operator runs to clear it. Why: any automatic takeover needs a check-then-act on the lock (read owner, decide, remove), and
+ * with three or more racing processes a second process can remove the lock a first process has just taken over, leaving two
+ * holders and a forked hash chain. With no takeover there is no such step to race. The price is that a crashed holder needs a
+ * human; that is the restrictive choice.
+ * Waits a bounded time for a live holder. Any timeout or error throws (refuse).
  */
-export function acquireLock(lockPath, { now = Date.now, timeoutMs = 5000, staleMs = 30000, pollMs = 10, pidAlive = defaultPidAlive } = {}) {
+export function acquireLock(lockPath, { now = Date.now, timeoutMs = 5000, pollMs = 10, pidAlive = defaultPidAlive } = {}) {
   const deadline = Date.now() + timeoutMs;
   for (;;) {
     let tmp;
     try {
       tmp = mkdtempSync(`${lockPath}.t-`);
-      writeFileSync(join(tmp, 'owner.json'), JSON.stringify({ pid: process.pid, at_ms: now() }), { mode: 0o600 });
+      writeFileSync(join(tmp, 'owner.json'), JSON.stringify({ pid: process.pid, at_ms: now(), token: randomBytes(8).toString('hex') }), { mode: 0o600 });
       renameSync(tmp, lockPath);
       // Release by renaming away first (atomic), then deleting: deleting in place could remove a successor's fresh lock.
       return () => {
         const gone = `${lockPath}.rel-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-        try { renameSync(lockPath, gone); rmSync(gone, { recursive: true, force: true }); } catch { /* a stale lock would be recovered later or refused */ }
+        try { renameSync(lockPath, gone); rmSync(gone, { recursive: true, force: true }); } catch { /* the lock stays; the next caller refuses with instructions */ }
       };
     } catch (err) {
       if (tmp) { try { rmSync(tmp, { recursive: true, force: true }); } catch { /* ignore */ } }
       if (!['EEXIST', 'ENOTEMPTY', 'EISDIR', 'ENOTDIR'].includes(err.code)) throw new LedgerError('ledger', `ledger lock error (${err.code ?? 'unknown'}); refusing`);
     }
     const owner = readOwner(lockPath);
-    if (owner && Number.isSafeInteger(owner.pid) && Number.isFinite(owner.at_ms) && !pidAlive(owner.pid) && now() - owner.at_ms > staleMs) {
-      // Break it atomically (rename away), then confirm we moved the very lock we examined.
-      const aside = `${lockPath}.broken-${process.pid}-${Date.now()}`;
-      try {
-        renameSync(lockPath, aside);
-        const moved = readOwner(aside);
-        if (moved && moved.pid === owner.pid && moved.at_ms === owner.at_ms) { rmSync(aside, { recursive: true, force: true }); continue; }
-        // We moved someone else's fresh lock: put it back if we can, then refuse rather than guess.
-        try { renameSync(aside, lockPath); } catch { /* lost the race; the lock holder will fail closed on its own */ }
-        throw new LedgerError('ledger', 'ledger lock changed while recovering a stale lock; refusing');
-      } catch (err) {
-        if (err instanceof LedgerError) throw err;
-        // ENOENT etc: another process broke or released it first; just retry.
-      }
+    if (owner && Number.isSafeInteger(owner.pid) && !pidAlive(owner.pid)) {
+      throw new LedgerError('ledger', `ledger lock ${lockPath} is held by pid ${owner.pid}, which is no longer running (a crashed run). It is NOT broken automatically. If no agent run is using this ledger, clear it by hand with: ${clearCommand(lockPath)}; refusing`);
     }
-    if (Date.now() >= deadline) throw new LedgerError('ledger', 'ledger lock timeout; refusing');
+    if (Date.now() >= deadline) throw new LedgerError('ledger', `ledger lock timeout on ${lockPath}; refusing`);
     sleepSync(pollMs);
   }
 }

@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, readdirSync, statSync, existsSync, rmSync, utimesSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, readdirSync, statSync, existsSync, rmSync, utimesSync, realpathSync } from 'node:fs';
 import { execFileSync, spawn } from 'node:child_process';
 import { tmpdir, homedir } from 'node:os';
 import { join, dirname, resolve, sep } from 'node:path';
@@ -122,19 +122,18 @@ test('ledger: a lock timeout refuses', () => {
   assert.equal(lines(dir).length, 1, 'nothing was appended');
 });
 
-test('ledger: a stale lock from a dead pid is recovered, a live pid lock is not broken', async () => {
+test('ledger: a dead-pid lock is never broken, whatever its age, and the refusal names the lock and the clearing command', async () => {
   const dir = tdir();
   const dead = spawn(process.execPath, ['-e', '0']); await new Promise((res) => dead.on('exit', res));
-  const l = openLedger(dir, { lockTimeoutMs: 300, lockPollMs: 5, lockStaleMs: 1000 });
+  const l = openLedger(dir, { lockTimeoutMs: 300, lockPollMs: 5 });
   const r = l.openRun(grant(), 'run-1');
-  const lock = join(dir, `${files(dir)[0]}.lock`);
-  const plant = (pid, ageMs) => { mkdirSync(lock); writeFileSync(join(lock, 'owner.json'), JSON.stringify({ pid, at_ms: Date.now() - ageMs })); };
-  // dead pid but FRESH lock: not old enough, not broken
-  plant(dead.pid, 10); assert.throws(() => r.reserve({ micro: 1 }), /lock timeout/); rmSync(lock, { recursive: true });
-  // live pid and OLD lock: not broken
-  plant(process.pid, 60_000); assert.throws(() => r.reserve({ micro: 1 }), /lock timeout/); assert.ok(existsSync(lock)); rmSync(lock, { recursive: true });
-  // dead pid and old: recovered
-  plant(dead.pid, 60_000);
+  const lock = join(realpathSync.native(dir), `${files(dir)[0]}.lock`);
+  for (const ageMs of [10, 60_000, 86_400_000]) {
+    mkdirSync(lock); writeFileSync(join(lock, 'owner.json'), JSON.stringify({ pid: dead.pid, at_ms: Date.now() - ageMs }));
+    assert.throws(() => r.reserve({ micro: 1 }), (e) => e instanceof LedgerError && e.message.includes(lock) && e.message.includes(`rm -r '${lock}'`) && /no longer running/.test(e.message));
+    assert.ok(existsSync(lock), 'not removed'); rmSync(lock, { recursive: true });
+  }
+  assert.equal(lines(dir).length, 1, 'nothing was appended');
   r.reserve({ micro: 1 });
   assert.equal(existsSync(lock), false, 'the lock is released after use');
 });
