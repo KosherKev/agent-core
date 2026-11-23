@@ -1,0 +1,1 @@
+{"schema_version":"1","goal":"Add a README section","repo":"github.com/KosherKev/agent-core","grant":{"schema_version":"1","task_id":"T-100","scope":{"repos":["agent-core"],"paths":["src/**","docs/**"]},"budget":{"max_usd":5,"max_tool_calls":200},"expires_at":"2026-12-01T00:00:00Z","allowed_risk_tiers":["low","medium"]}}

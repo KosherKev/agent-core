@@ -1,0 +1,1 @@
+{"schema_version":"1","modules":[{"name":"builder-capabilities","path":"src/builder-capabilities.js","capabilities":[{"name":"builder.read-file","version":"1.0.0","risk_tier":"low","scopes":["repo:read:task-worktree"]}]},{"name":"grant/meter","path":"src/grant/meter.js"}],"contracts":[],"adrs":[]}

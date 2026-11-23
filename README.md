@@ -15,7 +15,9 @@ Tenets: modular (parts swap behind contracts), correctable (every change reversi
 2. **Extension request** (`extension-request`, ADR-0002): how the agent asks for a capability it lacks, with an undo plan.
 3. **Run journal** (`run-journal-entry`, `src/journal.js`, ADR-0003): append-only record of reservations, attempts and issues. API is `append` and `read` only.
 4. **Grant** (`grant`, ADR-0004): one per task; repos and paths, budget, expiry, allowed risk tiers (R3).
-5. **Self-model** (`self-model`, `self-model.json`, ADR-0005): generated index of modules, contracts and ADRs.
+5. **Self-model** (`self-model`, `self-model.json`, ADR-0005): generated index of modules (nested `src/` included), contracts, ADRs and, where manifests exist, module capabilities.
+
+Also a contract, added after the seven seams were fixed: **Task spec** (`task-spec`, ADR-0006): goal, repo identity (`host/owner/name`), optional branch, and a grant (embedded or by reference).
 6. **Locked acceptance suite** (`acceptance/`): runnable by the builder, not editable by it. Protected by `.github/CODEOWNERS` and the `protect-locked-paths` workflow (R4); see "Locked-path guard" below.
 7. **Overseer/gate boundary** (rules R2 and R4): the line between the builder and whoever answers gates. This repo defines only what crosses it (the contracts above); the overseer itself lives elsewhere and is out of scope.
 

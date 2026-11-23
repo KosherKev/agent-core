@@ -25,7 +25,7 @@
       "properties": {
         "kind": { "const": "attempt" },
         "tried": { "type": "string", "minLength": 1 },
-        "outcome": { "enum": ["ok", "failed", "blocked"] },
+        "outcome": { "enum": ["ok", "failed", "blocked", "refused", "truncated"] },
         "reason": { "type": "string", "minLength": 1 }
       },
       "required": ["tried", "outcome", "reason"]
@@ -36,7 +36,8 @@
         "category": { "enum": ["bug", "risk", "improvement"] },
         "description": { "type": "string", "minLength": 1 },
         "severity": { "enum": ["low", "medium", "high", "critical"] },
-        "suggested_fix": { "type": "string", "minLength": 1 }
+        "suggested_fix": { "type": "string", "minLength": 1 },
+        "issue_kind": { "type": "string", "pattern": "^[a-z][a-z0-9]*(-[a-z0-9]+)*$", "maxLength": 64 }
       },
       "required": ["category", "description", "severity", "suggested_fix"]
     }

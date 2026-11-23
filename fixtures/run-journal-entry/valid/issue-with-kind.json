@@ -1,0 +1,1 @@
+{"schema_version":"1","id":"j1","run_id":"r1","at":"2026-11-23T05:00:00Z","kind":"issue","issue_kind":"contract-gap","category":"improvement","description":"Issue entries have no kind field","severity":"low","suggested_fix":"Add issue_kind"}

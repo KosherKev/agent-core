@@ -7,7 +7,41 @@
     },
     {
       "name": "builder-capabilities",
-      "path": "src/builder-capabilities.js"
+      "path": "src/builder-capabilities.js",
+      "capabilities": [
+        {
+          "name": "builder.commit-branch",
+          "version": "1.0.0",
+          "risk_tier": "low",
+          "scopes": [
+            "repo:commit:task-branch"
+          ]
+        },
+        {
+          "name": "builder.list-dir",
+          "version": "1.0.0",
+          "risk_tier": "low",
+          "scopes": [
+            "repo:read:task-worktree"
+          ]
+        },
+        {
+          "name": "builder.read-file",
+          "version": "1.0.0",
+          "risk_tier": "low",
+          "scopes": [
+            "repo:read:task-worktree"
+          ]
+        },
+        {
+          "name": "builder.write-file",
+          "version": "1.0.0",
+          "risk_tier": "low",
+          "scopes": [
+            "repo:write:task-worktree"
+          ]
+        }
+      ]
     },
     {
       "name": "builder-config",
@@ -22,8 +56,56 @@
       "path": "src/builder-redact.js"
     },
     {
+      "name": "grant/expiry",
+      "path": "src/grant/expiry.js"
+    },
+    {
+      "name": "grant/index",
+      "path": "src/grant/index.js"
+    },
+    {
+      "name": "grant/meter",
+      "path": "src/grant/meter.js"
+    },
+    {
+      "name": "grant/money",
+      "path": "src/grant/money.js"
+    },
+    {
+      "name": "grant/prices",
+      "path": "src/grant/prices.js"
+    },
+    {
+      "name": "grant/spend-log",
+      "path": "src/grant/spend-log.js"
+    },
+    {
       "name": "journal",
       "path": "src/journal.js"
+    },
+    {
+      "name": "ledger/durable",
+      "path": "src/ledger/durable.js"
+    },
+    {
+      "name": "ledger/format",
+      "path": "src/ledger/format.js"
+    },
+    {
+      "name": "ledger/index",
+      "path": "src/ledger/index.js"
+    },
+    {
+      "name": "ledger/ledger",
+      "path": "src/ledger/ledger.js"
+    },
+    {
+      "name": "ledger/lock",
+      "path": "src/ledger/lock.js"
+    },
+    {
+      "name": "ledger/report",
+      "path": "src/ledger/report.js"
     },
     {
       "name": "self-model",
@@ -59,6 +141,11 @@
       "name": "self-model",
       "version": "v1",
       "path": "schemas/v1/self-model.schema.json"
+    },
+    {
+      "name": "task-spec",
+      "version": "v1",
+      "path": "schemas/v1/task-spec.schema.json"
     }
   ],
   "adrs": [
@@ -86,6 +173,11 @@
       "id": "ADR-0005",
       "title": "Self-model contract",
       "path": "docs/adr/0005-self-model.md"
+    },
+    {
+      "id": "ADR-0006",
+      "title": "Task spec contract",
+      "path": "docs/adr/0006-task-spec.md"
     }
   ]
 }
