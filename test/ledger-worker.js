@@ -10,5 +10,5 @@ try {
   for (let i = 0; i < Number(attempts); i += 1) {
     try { const rid = run.reserve({ micro: Number(micro) }); run.settle(rid, Number(micro)); ok += 1; } catch (e) { if (e.kind === 'budget') refused += 1; else { errors += 1; console.error(String(e?.message)); } }
   }
-} catch { errors += 1; }
+} catch (e) { if (e.kind === 'budget') refused += 1; else { errors += 1; console.error(String(e?.message)); } }
 console.log(JSON.stringify({ ok, refused, errors }));
