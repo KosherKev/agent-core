@@ -1,0 +1,1 @@
+{"schema_version":"1","modules":[{"name":"journal","path":"src/journal.js"}],"contracts":[{"name":"grant","version":"v1","path":"schemas/v1/grant.schema.json"}],"adrs":[{"id":"ADR-0004","title":"Grant contract","path":"docs/adr/0004-grant.md"}]}

@@ -1,0 +1,37 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "self-model",
+  "title": "Self-model v1",
+  "description": "Generated index of modules, contracts and ADRs. Never hand-edited.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "modules", "contracts", "adrs"],
+  "properties": {
+    "schema_version": { "const": "1" },
+    "modules": { "type": "array", "items": { "$ref": "#/$defs/module" } },
+    "contracts": { "type": "array", "items": { "$ref": "#/$defs/contract" } },
+    "adrs": { "type": "array", "items": { "$ref": "#/$defs/adr" } }
+  },
+  "$defs": {
+    "module": {
+      "type": "object", "additionalProperties": false, "required": ["name", "path"],
+      "properties": { "name": { "type": "string", "minLength": 1 }, "path": { "type": "string", "minLength": 1 } }
+    },
+    "contract": {
+      "type": "object", "additionalProperties": false, "required": ["name", "version", "path"],
+      "properties": {
+        "name": { "type": "string", "minLength": 1 },
+        "version": { "type": "string", "pattern": "^v[0-9]+$" },
+        "path": { "type": "string", "minLength": 1 }
+      }
+    },
+    "adr": {
+      "type": "object", "additionalProperties": false, "required": ["id", "title", "path"],
+      "properties": {
+        "id": { "type": "string", "pattern": "^ADR-[0-9]{4}$" },
+        "title": { "type": "string", "minLength": 1 },
+        "path": { "type": "string", "minLength": 1 }
+      }
+    }
+  }
+}

@@ -1,0 +1,71 @@
+{
+  "schema_version": "1",
+  "modules": [
+    {
+      "name": "journal",
+      "path": "src/journal.js"
+    },
+    {
+      "name": "self-model",
+      "path": "src/self-model.js"
+    },
+    {
+      "name": "validators",
+      "path": "src/validators.js"
+    }
+  ],
+  "contracts": [
+    {
+      "name": "capability-manifest",
+      "version": "v1",
+      "path": "schemas/v1/capability-manifest.schema.json"
+    },
+    {
+      "name": "extension-request",
+      "version": "v1",
+      "path": "schemas/v1/extension-request.schema.json"
+    },
+    {
+      "name": "grant",
+      "version": "v1",
+      "path": "schemas/v1/grant.schema.json"
+    },
+    {
+      "name": "run-journal-entry",
+      "version": "v1",
+      "path": "schemas/v1/run-journal-entry.schema.json"
+    },
+    {
+      "name": "self-model",
+      "version": "v1",
+      "path": "schemas/v1/self-model.schema.json"
+    }
+  ],
+  "adrs": [
+    {
+      "id": "ADR-0001",
+      "title": "Capability manifest contract",
+      "path": "docs/adr/0001-capability-manifest.md"
+    },
+    {
+      "id": "ADR-0002",
+      "title": "Extension request contract",
+      "path": "docs/adr/0002-extension-request.md"
+    },
+    {
+      "id": "ADR-0003",
+      "title": "Run journal contract",
+      "path": "docs/adr/0003-run-journal.md"
+    },
+    {
+      "id": "ADR-0004",
+      "title": "Grant contract",
+      "path": "docs/adr/0004-grant.md"
+    },
+    {
+      "id": "ADR-0005",
+      "title": "Self-model contract",
+      "path": "docs/adr/0005-self-model.md"
+    }
+  ]
+}
