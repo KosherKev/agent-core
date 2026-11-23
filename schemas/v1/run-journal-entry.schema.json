@@ -1,0 +1,45 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "run-journal-entry",
+  "title": "Run journal entry v1",
+  "description": "Append-only record. Three kinds: reservation, attempt, issue.",
+  "type": "object",
+  "required": ["schema_version", "id", "run_id", "at", "kind"],
+  "properties": {
+    "schema_version": { "const": "1" },
+    "id": { "type": "string", "minLength": 1 },
+    "run_id": { "type": "string", "minLength": 1 },
+    "at": { "type": "string", "format": "date-time" },
+    "kind": { "enum": ["reservation", "attempt", "issue"] }
+  },
+  "oneOf": [
+    {
+      "properties": {
+        "kind": { "const": "reservation" },
+        "doubt": { "type": "string", "minLength": 1 },
+        "action_taken": { "type": "string", "minLength": 1 }
+      },
+      "required": ["doubt", "action_taken"]
+    },
+    {
+      "properties": {
+        "kind": { "const": "attempt" },
+        "tried": { "type": "string", "minLength": 1 },
+        "outcome": { "enum": ["ok", "failed", "blocked"] },
+        "reason": { "type": "string", "minLength": 1 }
+      },
+      "required": ["tried", "outcome", "reason"]
+    },
+    {
+      "properties": {
+        "kind": { "const": "issue" },
+        "category": { "enum": ["bug", "risk", "improvement"] },
+        "description": { "type": "string", "minLength": 1 },
+        "severity": { "enum": ["low", "medium", "high", "critical"] },
+        "suggested_fix": { "type": "string", "minLength": 1 }
+      },
+      "required": ["category", "description", "severity", "suggested_fix"]
+    }
+  ],
+  "unevaluatedProperties": false
+}
