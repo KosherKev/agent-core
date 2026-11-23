@@ -124,6 +124,14 @@ test('adapter end to end: case-variant writes to locked paths and .GIT/config ch
   assert.ok(!existsSync(marker));
 });
 
+test('confine: a write to CODEOWNERS spelled with a long s (U+017F) is refused', () => {
+  const dir = repo();
+  refused(dir, 'docs/CODEOWNER\u017f');
+  refused(dir, 'docs/codeowner\u017f');
+  assert.equal(isLockedPath('docs/CODEOWNER\u017f'), true);
+  assert.equal(isLockedPath('docs/readme\u017f'), false);
+});
+
 // ---- shared corpus: the guard's own logic vs the adapter's check ----
 const guardLocked = parseLocked(readFileSync(join(REPO_ROOT, '.github/locked-paths.txt'), 'utf8'));
 const canonical = [

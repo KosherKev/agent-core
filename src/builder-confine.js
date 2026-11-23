@@ -17,7 +17,7 @@ const IGNORABLE = /[​-‏‪-‮⁠-⁯﻿­]/g;
 
 /** One path segment, folded the way a case-insensitive, normalisation-insensitive filesystem would compare it. */
 export function foldSegment(s) {
-  return s.normalize('NFD').replace(IGNORABLE, '').normalize('NFC').toLowerCase().normalize('NFC');
+  return s.normalize('NFD').replace(IGNORABLE, '').normalize('NFC').toUpperCase().toLowerCase().normalize('NFC');
 }
 /** Segment with trailing dots/spaces removed (Windows and some network filesystems treat `.git ` as `.git`). */
 const stripTrail = (s) => s.replace(/[. ]+$/, '');
