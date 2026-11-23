@@ -141,11 +141,11 @@ test('meter: any internal error refuses (a throwing clock, a throwing sink)', ()
 test('meter: float rounding case, thousands of tiny costs sum exactly in micro-USD', () => {
   const { m } = meterOf(1);
   let float = 0;
-  for (let i = 0; i < 3000; i++) { const r = m.reserve({ input: 'a', max_tokens: 1 }); m.settle(r, { cost: 0.000003 }); float += 0.1; }
+  for (let i = 0; i < 3000; i++) { const r = m.reserve({ input: 'a', max_tokens: 1 }); m.settle(r, { prompt_tokens: 1, completion_tokens: 1, cost: 0.000003 }); float += 0.1; }
   assert.equal(m.snapshot().settled_micro, 9000);
   assert.notEqual(float, 300, 'sanity: naive float addition of 0.1 does drift');
   const { m: m2 } = meterOf(1);
-  for (let i = 0; i < 10; i++) m2.settle(m2.reserve({ input: 'a', max_tokens: 1 }), { cost: '0.1' });
+  for (let i = 0; i < 10; i++) m2.settle(m2.reserve({ input: 'a', max_tokens: 1 }), { prompt_tokens: 0, completion_tokens: 0, cost: '0.1' });
   assert.equal(m2.snapshot().settled_micro, 1_000_000);
   assert.equal(microToUsd(m2.snapshot().settled_micro), '1.000000');
   assert.ok(Number.isSafeInteger(m2.snapshot().remaining_micro));
@@ -169,4 +169,55 @@ test('prices: the tracked price file loads, validates and lists no paid model wi
   assert.throws(() => parsePriceTable({ schema_version: '1', models: { a: { input_micro_per_mtok: 1.5, output_micro_per_mtok: 1 } } }));
   assert.throws(() => parsePriceTable({ schema_version: '2', models: {} }));
   assert.equal(loadPriceTable('/nonexistent/prices.json').table, null);
+});
+
+// Cost rule: a paid model settles at the higher of reported and computed cost. Prices: $1/M in, $2/M out.
+// 1000 in + 500 out = 1000 + 1000 = 2000 micro computed.
+const USAGE = { prompt_tokens: 1000, completion_tokens: 500 };
+const settleWith = (usage, over = {}) => { const { m } = meterOf(1, over); const r = m.reserve({ input: 'a', max_tokens: 1000 }); return { cost: m.settle(r, usage), m, r }; };
+
+test('cost: a reported cost of 0 on a paid model settles at the computed cost', () => {
+  const { cost, m } = settleWith({ ...USAGE, cost: 0 });
+  assert.equal(cost, 2000);
+  assert.equal(m.spendLog().at(-1).source, 'computed');
+  assert.equal(settleWith({ ...USAGE, cost: '0' }).cost, 2000);
+});
+
+test('cost: a reported cost higher than computed is honoured', () => {
+  const { cost, m } = settleWith({ ...USAGE, cost: 0.003 });
+  assert.equal(cost, 3000);
+  assert.equal(m.spendLog().at(-1).source, 'provider');
+});
+
+test('cost: a negative reported cost falls back to the computed cost', () => {
+  assert.equal(settleWith({ ...USAGE, cost: -1 }).cost, 2000);
+});
+
+test('cost: a NaN or infinite reported cost falls back to the computed cost', () => {
+  assert.equal(settleWith({ ...USAGE, cost: NaN }).cost, 2000);
+  assert.equal(settleWith({ ...USAGE, cost: Infinity }).cost, 2000);
+});
+
+test('cost: a non-numeric string reported cost falls back to the computed cost', () => {
+  for (const bad of ['free', '', '-0.5', '1e-9', {}, [], true]) assert.equal(settleWith({ ...USAGE, cost: bad }).cost, 2000, JSON.stringify(bad));
+});
+
+test('cost: a null reported cost falls back to the computed cost', () => {
+  assert.equal(settleWith({ ...USAGE, cost: null }).cost, 2000);
+});
+
+test('cost: missing usage still settles at the worst-case reservation even with a reported cost', () => {
+  const { cost, r } = settleWith({ cost: 0 });
+  assert.equal(cost, r.reserved_micro);
+  const b = settleWith({ cost: 0.000001 });
+  assert.equal(b.cost, b.r.reserved_micro);
+});
+
+test('cost: a :free model is unchanged (reported cost if valid, else zero)', () => {
+  const table = parsePriceTable({ schema_version: '1', models: {} });
+  const c = clock();
+  const m = createMeter(grantOf(1), { now: c.now, priceTable: table, model: 'v/m:free' });
+  assert.equal(m.settle(m.reserve({ input: 'a', max_tokens: 10 }), { ...USAGE, cost: 0 }), 0);
+  assert.equal(m.settle(m.reserve({ input: 'a', max_tokens: 10 }), USAGE), 0);
+  assert.equal(m.settle(m.reserve({ input: 'a', max_tokens: 10 }), { ...USAGE, cost: 0.000005 }), 5);
 });

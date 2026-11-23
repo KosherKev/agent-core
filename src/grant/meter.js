@@ -134,8 +134,9 @@ export function createMeter(grant, { now = Date.now, priceTable, model, sink } =
 
       /**
        * Replace a reservation with the actual cost. usage: { prompt_tokens, completion_tokens, cost? } or null/undefined.
-       * Cost source order: provider-reported usage.cost, else computed from token counts and the price table, else
-       * (paid model, no usable usage) the full reservation. Never zero for a paid model without evidence.
+       * Paid model: the higher of provider-reported usage.cost and the cost computed from token counts and the
+       * price table (a reported 0, negative, non-finite or non-number cost is never trusted below computed); with no usable
+       * usage, the full reservation. Free model: reported cost if valid, else 0. Never zero for a paid model without evidence.
        */
       settle: guard((reservation, usage) => {
         const open = state.open.get(reservation?.id);
@@ -144,10 +145,13 @@ export function createMeter(grant, { now = Date.now, priceTable, model, sink } =
         let provider = null;
         if (usage && usage.cost !== undefined && usage.cost !== null) { try { provider = usdToMicro(usage.cost, 'ceil'); } catch { provider = null; } }
         const free = open.price.input_micro_per_mtok === 0 && open.price.output_micro_per_mtok === 0;
-        if (provider !== null) { cost = provider; source = 'provider'; }
-        else if (free) { cost = 0; source = 'free'; }
-        else if (usage && isCount(usage.prompt_tokens) && isCount(usage.completion_tokens)) { cost = callCost(usage.prompt_tokens, usage.completion_tokens, open.price); source = 'computed'; }
-        else { cost = open.reserved; source = 'worst_case'; }
+        const computed = usage && isCount(usage.prompt_tokens) && isCount(usage.completion_tokens) ? callCost(usage.prompt_tokens, usage.completion_tokens, open.price) : null;
+        if (free) {
+          if (provider !== null) { cost = provider; source = 'provider'; } else { cost = 0; source = 'free'; }
+        } else if (computed !== null) {
+          // A reported cost is never trusted below the computed cost; higher wins. Malformed reported costs were dropped above.
+          if (provider !== null && provider >= computed) { cost = provider; source = 'provider'; } else { cost = computed; source = 'computed'; }
+        } else { cost = open.reserved; source = 'worst_case'; }
         state.open.delete(reservation.id);
         state.settled += cost;
         record({ event: 'settle', call_id: reservation.id, source, cost_micro: cost, reserved_micro: open.reserved });
