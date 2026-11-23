@@ -1,12 +1,12 @@
 import { execFileSync } from 'node:child_process';
-import { appendFileSync, mkdirSync, readFileSync, writeFileSync, readdirSync, statSync, existsSync, realpathSync } from 'node:fs';
+import { appendFileSync, mkdirSync, readFileSync, writeFileSync, readdirSync, statSync, existsSync, realpathSync, openSync, readSync, closeSync, fstatSync } from 'node:fs';
 import { dirname, join, basename } from 'node:path';
 import { randomBytes } from 'node:crypto';
 import { createJournal } from './journal.js';
 import { validateGrant } from './validators.js';
 import { isFreeModel } from './builder-config.js';
 import { makeRedactor, redactError } from './builder-redact.js';
-import { confine, ConfineError } from './builder-confine.js';
+import { confine, ConfineError, isReadDenied } from './builder-confine.js';
 import { BUILDER_CAPABILITIES, validateCapabilities } from './builder-capabilities.js';
 
 /** Documented exit codes. */
@@ -195,12 +195,18 @@ export async function runBuilder({ config, task }, opts = {}) {
     const runTool = (name, args) => {
       if (name === 'read_file') {
         const { abs } = confine(workdir, args.path);
-        const buf = readFileSync(abs);
-        return buf.subarray(0, LIMITS.MAX_READ_BYTES).toString('utf8');
+        // Open first, check it is a regular file, then read at most MAX_READ_BYTES (no whole-file read, no FIFO hang).
+        const fd = openSync(abs, 'r');
+        try {
+          if (!fstatSync(fd).isFile()) throw new ConfineError('not a regular file');
+          const buf = Buffer.alloc(LIMITS.MAX_READ_BYTES);
+          const n = readSync(fd, buf, 0, LIMITS.MAX_READ_BYTES, 0);
+          return buf.subarray(0, n).toString('utf8');
+        } finally { closeSync(fd); }
       }
       if (name === 'list_dir') {
         const { abs } = confine(workdir, args.path);
-        return readdirSync(abs).filter((n) => n !== '.git' && n !== '.agent-runs').sort().map((n) => (statSync(join(abs, n)).isDirectory() ? `${n}/` : n)).join('\n');
+        return readdirSync(abs).filter((n) => n !== '.agent-runs' && !isReadDenied(n)).sort().map((n) => (statSync(join(abs, n)).isDirectory() ? `${n}/` : n)).join('\n');
       }
       const { abs, rel } = confine(workdir, args.path, { write: true, allowedPaths: allowed });
       if (Buffer.byteLength(args.content) > LIMITS.MAX_FILE_BYTES) throw new ConfineError('file too large');
