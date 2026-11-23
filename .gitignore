@@ -1,1 +1,3 @@
 node_modules/
+.agent-builder.local.json
+.agent-runs/
