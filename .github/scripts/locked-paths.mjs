@@ -1,4 +1,4 @@
-import { readFileSync } from 'node:fs';
+import { readFileSync, realpathSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
@@ -143,4 +143,10 @@ function main() {
     return 2;
   }
 }
-if (process.argv[1] === fileURLToPath(import.meta.url)) process.exit(main());
+// Compare real paths: argv[1] may be a symlink (or sit under one), import.meta.url never is. A plain string
+// compare silently skipped main() and exited 0. If the check itself errors, run main() anyway (fail closed).
+function isEntryPoint() {
+  if (!process.argv[1]) return false;
+  try { return realpathSync(process.argv[1]) === realpathSync(fileURLToPath(import.meta.url)); } catch { return true; }
+}
+if (isEntryPoint()) process.exit(main());
