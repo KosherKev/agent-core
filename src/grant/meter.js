@@ -1,5 +1,6 @@
 import { usdToMicro, callCost } from './money.js';
 import { priceFor, parsePriceTable } from './prices.js';
+import { parseExpiry } from './expiry.js';
 
 /** Why a meter refused. `limit` is one of: budget, tool_calls, expiry, clock, grant, price, internal. */
 export class GrantError extends Error {
@@ -62,7 +63,7 @@ export function createMeter(grant, { now = Date.now, priceTable, model, sink } =
     const maxCalls = g.budget?.max_tool_calls;
     if (typeof maxUsd !== 'number' || !Number.isFinite(maxUsd) || maxUsd <= 0) throw new GrantError('grant', 'grant budget.max_usd is missing or invalid');
     if (!Number.isSafeInteger(maxCalls) || maxCalls < 1) throw new GrantError('grant', 'grant budget.max_tool_calls is missing or invalid');
-    const expiresAt = typeof g.expires_at === 'string' ? Date.parse(g.expires_at) : NaN;
+    const expiresAt = parseExpiry(g.expires_at);
     if (Number.isNaN(expiresAt)) throw new GrantError('grant', 'grant expires_at is missing or invalid');
     const budgetMicro = usdToMicro(maxUsd, 'floor'); // round the budget down: restrictive
     if (budgetMicro < 1) throw new GrantError('grant', 'grant budget.max_usd is below one micro-USD');

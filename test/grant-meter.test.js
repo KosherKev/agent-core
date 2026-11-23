@@ -221,3 +221,42 @@ test('cost: a :free model is unchanged (reported cost if valid, else zero)', () 
   assert.equal(m.settle(m.reserve({ input: 'a', max_tokens: 10 }), USAGE), 0);
   assert.equal(m.settle(m.reserve({ input: 'a', max_tokens: 10 }), { ...USAGE, cost: 0.000005 }), 5);
 });
+
+// Strict expiry: ISO-8601 date-time with an explicit offset, real calendar value, nothing else.
+const meterWithExpiry = (expires_at) => createMeter(grantOf(1, { expires_at }), { now: clock().now, priceTable: PRICES, model: 'v/paid' });
+
+test('expiry: a timestamp without an offset refuses', () => {
+  for (const v of ['2030-01-01T01:00:00', '2030-01-01T01:00:00.123', '2030-01-01 01:00:00']) throwsLimit(() => meterWithExpiry(v), 'grant');
+});
+
+test('expiry: a date-only value refuses', () => {
+  throwsLimit(() => meterWithExpiry('2030-01-01'), 'grant');
+});
+
+test('expiry: a locale or free-form string refuses', () => {
+  for (const v of ['Mon 23 Nov 2026', 'Mon, 23 Nov 2026 10:00:00 GMT', '11/23/2026', 'tomorrow', '1893459600000']) throwsLimit(() => meterWithExpiry(v), 'grant');
+});
+
+test('expiry: a calendar-invalid date refuses (Feb 30, month 13, hour 25, Feb 29 in a non-leap year)', () => {
+  for (const v of ['2026-02-30T00:00:00Z', '2026-13-01T00:00:00Z', '2026-01-01T25:00:00Z', '2027-02-29T00:00:00Z', '2026-01-01T00:60:00Z', '2026-00-10T00:00:00Z', '2026-01-01T00:00:00+24:00']) throwsLimit(() => meterWithExpiry(v), 'grant');
+  assert.equal(meterWithExpiry('2028-02-29T00:00:00Z').snapshot().expires_at_ms, Date.parse('2028-02-29T00:00:00Z'), 'a real leap day is accepted');
+});
+
+test('expiry: a padded, empty or non-string value refuses', () => {
+  for (const v of [' 2030-01-01T01:00:00Z', '2030-01-01T01:00:00Z ', '2030-01-01T01:00:00Z\n', '', undefined, null, 1893459600000, {}, ['2030-01-01T01:00:00Z']]) throwsLimit(() => meterWithExpiry(v), 'grant');
+});
+
+test('expiry: Z, +00:00 and -05:00 are accepted and compared as the instants they denote', () => {
+  const z = meterWithExpiry('2030-01-01T01:00:00Z').snapshot().expires_at_ms;
+  assert.equal(z, Date.parse('2030-01-01T01:00:00Z'));
+  assert.equal(meterWithExpiry('2030-01-01T01:00:00+00:00').snapshot().expires_at_ms, z);
+  assert.equal(meterWithExpiry('2030-01-01T01:00:00.000Z').snapshot().expires_at_ms, z);
+  assert.equal(meterWithExpiry('2029-12-31T20:00:00-05:00').snapshot().expires_at_ms, z);
+  assert.equal(meterWithExpiry('2030-01-01T06:30:00+05:30').snapshot().expires_at_ms, z);
+  // The same instant expires at the same moment whichever notation wrote it.
+  const c = clock(z - 1);
+  const m = createMeter(grantOf(1, { expires_at: '2029-12-31T20:00:00-05:00' }), { now: c.now, priceTable: PRICES, model: 'v/paid' });
+  m.checkExpiry();
+  c.t = z;
+  throwsLimit(() => m.checkExpiry(), 'expiry');
+});

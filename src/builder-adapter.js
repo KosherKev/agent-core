@@ -8,7 +8,7 @@ import { isFreeModel, checkBaseUrl } from './builder-config.js';
 import { makeRedactor, redactError } from './builder-redact.js';
 import { confine, ConfineError, isReadDenied } from './builder-confine.js';
 import { BUILDER_CAPABILITIES, validateCapabilities } from './builder-capabilities.js';
-import { createMeter, createSpendSink, GrantError, isMeter, loadPriceTable, DEFAULT_MAX_OUTPUT_TOKENS } from './grant/index.js';
+import { createMeter, createSpendSink, GrantError, isMeter, loadPriceTable, parseExpiry, DEFAULT_MAX_OUTPUT_TOKENS } from './grant/index.js';
 
 /** Documented exit codes. */
 /** GRANT_EXCEEDED (4): the grant's budget, tool-call limit or expiry ran out mid-run (or the clock went backwards); work so far is committed. */
@@ -180,7 +180,9 @@ export async function runBuilder({ config, task }, opts = {}) {
     }
     const g = validateGrant(task.grant);
     if (!g.valid) return refuse(`grant invalid: ${g.errors.join('; ')}`);
-    if (Date.parse(task.grant.expires_at) <= (opts.now ?? Date.now)()) return refuse('grant has expired');
+    const expiryMs = parseExpiry(task.grant.expires_at);
+    if (Number.isNaN(expiryMs)) return refuse('grant expires_at must be ISO-8601 date-time with an explicit timezone (Z or +hh:mm); refusing');
+    if (expiryMs <= (opts.now ?? Date.now)()) return refuse('grant has expired');
     if (!task.grant.scope.repos.includes(repoName) && !task.grant.scope.repos.includes(task.repo)) return refuse(`repo "${repoName}" is not in the grant's scope`);
     // Grant meter (R3): built before any network call. A grant the meter cannot use, or a paid model with no trusted price, refuses here.
     const prices = opts.priceTable ?? loadPriceTable().table;

@@ -102,6 +102,17 @@ test('an unknown paid model with a nonzero budget refuses before any network cal
   assert.equal(d.result.exit_code, EXIT.REFUSED);
 });
 
+test('a refused expiry at preflight makes zero requests and exits 2 (no offset, date-only, locale, calendar-invalid, padded, past)', async () => {
+  for (const bad of ['2030-01-01T01:00:00', '2030-01-01', 'Mon 23 Nov 2030', '2030-02-30T00:00:00Z', ' 2030-01-01T01:00:00Z', '2029-12-31T23:59:59Z']) {
+    const { result, mock } = await run({ grant: makeGrant({ expires_at: bad }), handler: () => reply({ content: 'never' }) });
+    assert.equal(mock.requests.length, 0, bad);
+    assert.equal(result.exit_code, EXIT.REFUSED, bad);
+    assert.equal(result.status, 'refused', bad);
+  }
+  const ok = await run({ grant: makeGrant({ expires_at: '2029-12-31T20:00:00-05:00' }), handler: () => withUsage(reply({ content: 'done' }), { prompt_tokens: 1, completion_tokens: 1 }) });
+  assert.equal(ok.result.exit_code, EXIT.OK, 'an equivalent offset notation is accepted');
+});
+
 test('a :free model needs no price but still enforces the tool-call limit and expiry', async () => {
   const many = [write('a', 1), write('b', 2), write('c', 3)];
   const a = await run({ model: 'v/m:free', prices: null, grant: makeGrant({ budget: { max_usd: 1, max_tool_calls: 2 }, expires_at: EXPIRES }), handler: () => reply({ tool_calls: many }, 'tool_calls') });
