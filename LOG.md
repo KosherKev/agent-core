@@ -1,5 +1,17 @@
 # LOG
 
+## 2026-11-23 (Spec C parity test and adapter fold fix)
+- Files touched: src/builder-confine.js, src/builder-adapter.js, test/builder-confine.test.js, test/builder-readdeny.test.js, LOG.md
+- What changed: fixed the red parity test on main (PR #4 merged with `test/builder-confine.test.js` "shared corpus" pinning the old guard's gap with a `deepEqual` on the adapter-only list; with the hardened guard that list is empty, so main failed 1 of 256 tests). The test now asserts parity both ways (`adapterOnly` and `guardOnly` both `[]`) and has four new hostile spellings (long-s CODEOWNERS, `sub/.GitAttributes`, `.git~1/x`, `a/.gitmodules`). `foldSegment` now folds exactly like the guard (`toUpperCase().toLowerCase()` before the final NFC), closing the long s (U+017F) and sharp s gap, with a test that a write to the long-s CODEOWNERS spelling is refused. `list_dir` now accepts the repository root (`.`, `./`, empty) for listing only, via a `confine` option `allowRoot` that is ignored when `write` is set; secrets and git internals stay hidden; test through the mock adapter. One existing list_dir test used a prefix match on `.git` that would now false-match `.github`; changed to an exact-name check.
+- Acceptance criteria (pass/fail each):
+  - parity test asserts adapterOnly == [] and guardOnly == [] with the new entries: PASS
+  - foldSegment matches the guard; long-s CODEOWNERS write refused; case/NFC/NFD tests still pass: PASS
+  - list_dir on root returns entries with no .git and no denylisted names; root writes refused: PASS
+  - full suite green on Node 24 and Node 22, check:self-model and audit clean: see Status
+- Deviations: the parity test commit alone is red on its long-s entry until the fold commit lands (one commit per issue as specified). The `list_dir` root test also covers the empty-string path, beyond `.` and `./`.
+- Status: complete on branch task/spec-c-parity-fix, awaiting review. Not merged, no PR. Nothing under .github/ or acceptance/ touched; `builder:smoke` not run.
+- Next step: Kevin opens the PR and reviews.
+
 ## 2026-11-23
 - Files touched: package.json, package-lock.json, .gitignore, schemas/v1/*.schema.json (5), src/{validators,journal,self-model}.js, scripts/build-self-model.js, self-model.json, fixtures/** (5 schemas, valid+invalid), test/*.test.js, acceptance/{README.md,contracts.test.js}, docs/adr/0001-0005, .github/{CODEOWNERS,locked-paths.txt,scripts/locked-paths.mjs,workflows/protect-locked-paths.yml}, README.md, LOG.md
 - What changed: new repo structure; versioned (v1) JSON Schemas with ajv validators for capability manifest, extension request, run journal entry (reservation/attempt/issue), grant, self-model; append/read-only journal API; deterministic self-model generator with staleness check; one ADR per contract; locked acceptance suite skeleton with CODEOWNERS and a CI workflow that fails agent-authored changes to locked paths; README (seven seams).
