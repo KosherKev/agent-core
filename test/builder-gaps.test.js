@@ -26,8 +26,9 @@ const REVIEWER = [
 ];
 
 const SELF_MODEL = [['self-model capabilities field', /no field for adapter capabilities/]];
+const SPEND = [['spend record has no journal kind', /no journal entry kind can hold a structured spend record/]];
 
-test('runtime journal carries all 8 logged gaps, the 5 reviewer gaps and the self-model capabilities gap as contract-gap issues', async () => {
+test('runtime journal carries all 8 logged gaps, the 5 reviewer gaps and the self-model capabilities gap and the spend-record gap as contract-gap issues', async () => {
   const dir = tempRepo();
   const mock = await startMock((_r, n) => happyScript(n));
   try {
@@ -35,11 +36,11 @@ test('runtime journal carries all 8 logged gaps, the 5 reviewer gaps and the sel
     const result = await runBuilder({ config, task: { repo: 'agent-core', goal: 'Write docs/hello.md', grant: makeGrant(), workdir: dir } });
     const gaps = result.entries.filter((e) => e.kind === 'issue' && e.description.startsWith('[kind: contract-gap]'));
     for (const e of gaps) assert.equal(validateJournalEntry(e).valid, true);
-    for (const [name, re] of [...LOGGED, ...REVIEWER, ...SELF_MODEL]) {
+    for (const [name, re] of [...LOGGED, ...REVIEWER, ...SELF_MODEL, ...SPEND]) {
       assert.equal(gaps.filter((e) => re.test(e.description)).length, 1, `gap not journaled exactly once: ${name}`);
     }
     assert.equal(gaps.length, CONTRACT_GAPS.length);
-    assert.equal(gaps.length, 14);
+    assert.equal(gaps.length, 15);
   } finally { await mock.close(); }
 });
 

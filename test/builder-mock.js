@@ -4,6 +4,15 @@ import { mkdtempSync, writeFileSync, mkdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
+import { parsePriceTable } from '../src/grant/index.js';
+
+/** Test-only prices (micro-USD per million tokens) for the fake models used against the mock server. Tiny, so default reservations fit a $1 grant. */
+export const TEST_PRICES = parsePriceTable({ schema_version: '1', models: {
+  'vendor-a/model-a': { input_micro_per_mtok: 10000, output_micro_per_mtok: 20000 },
+  'vendor-b/model-b': { input_micro_per_mtok: 10000, output_micro_per_mtok: 20000 },
+  'x/y': { input_micro_per_mtok: 10000, output_micro_per_mtok: 20000 },
+} });
+
 export const FAKE_KEY = 'sk-or-v1-FAKEKEY-for-tests-only-0123456789';
 
 /** Local OpenAI-compatible mock on 127.0.0.1 with an ephemeral port. `handler(req, n)` returns {status, headers, body}. */

@@ -9,7 +9,7 @@ import { runBuilder, EXIT, CONTRACT_GAPS, summarizeJournal, parseRetryAfter } fr
 import { BUILDER_CAPABILITIES, validateCapabilities } from '../src/builder-capabilities.js';
 import { confine, ConfineError } from '../src/builder-confine.js';
 import { validateJournalEntry } from '../src/validators.js';
-import { startMock, toolCall, reply, happyScript, tempRepo, makeGrant, FAKE_KEY } from './builder-mock.js';
+import { startMock, toolCall, reply, happyScript, tempRepo, makeGrant, FAKE_KEY, TEST_PRICES } from './builder-mock.js';
 
 const gitOut = (cwd, ...a) => execFileSync('git', a, { cwd, encoding: 'utf8' });
 
@@ -19,7 +19,7 @@ async function scenario({ model = 'vendor-a/model-a', env = {}, handler, repo = 
   const config = loadConfig({ env: { OPENROUTER_API_KEY: FAKE_KEY, AGENT_BUILDER_MODEL: model, AGENT_BUILDER_BASE_URL: mock.url, ...env }, cwd: tmpdir() });
   const sleeps = [];
   try {
-    const result = await runBuilder({ config, task: { repo, goal, grant: grant ?? makeGrant({ scope: { repos: [repo], paths: ['docs/'] } }), workdir: dir, branch } }, { sleep: async (ms) => { sleeps.push(ms); }, ...opts });
+    const result = await runBuilder({ config, task: { repo, goal, grant: grant ?? makeGrant({ scope: { repos: [repo], paths: ['docs/'] } }), workdir: dir, branch } }, { sleep: async (ms) => { sleeps.push(ms); }, priceTable: TEST_PRICES, ...opts });
     return { result, mock, dir, sleeps, config };
   } finally { await mock.close(); }
 }
@@ -265,12 +265,20 @@ test('reads are confined too (no traversal, no symlink escape)', () => {
   assert.doesNotThrow(() => confine(dir, 'README.md', { write: true, allowedPaths: ['.'] }));
 });
 
-test('grant budget: tool calls beyond max_tool_calls are blocked and the run stops', async () => {
+test('grant budget: tool calls beyond max_tool_calls stop the run with the grant-exceeded exit code, commit work so far and journal why', async () => {
   const many = Array.from({ length: 5 }, (_v, i) => toolCall('write_file', { path: `docs/f${i}.md`, content: 'x' }, `c${i}`));
-  const { result } = await scenario({ grant: makeGrant({ budget: { max_usd: 1, max_tool_calls: 2 } }), handler: () => reply({ tool_calls: many }, 'tool_calls') });
-  assert.equal(result.exit_code, EXIT.FAILED);
+  const { result, dir } = await scenario({ grant: makeGrant({ budget: { max_usd: 1, max_tool_calls: 2 } }), handler: () => reply({ tool_calls: many }, 'tool_calls') });
+  assert.equal(result.exit_code, EXIT.GRANT_EXCEEDED);
+  assert.equal(EXIT.GRANT_EXCEEDED, 4);
+  assert.notEqual(EXIT.GRANT_EXCEEDED, EXIT.RATE_LIMITED);
+  assert.equal(result.status, 'grant-exceeded');
   assert.deepEqual(result.files_written, ['docs/f0.md', 'docs/f1.md']);
-  assert.ok(kinds(result, 'attempt').some((e) => e.outcome === 'blocked' && /budget/.test(e.reason)));
+  assert.match(gitOut(dir, 'log', '-1', '--format=%s'), /^builder\(grant-exceeded\)/);
+  assert.ok(kinds(result, 'attempt').some((e) => e.outcome === 'blocked' && /tool_calls/.test(e.reason)));
+  const [iss] = issuesOf(result, 'grant-exceeded');
+  assert.match(iss.description, /"tool_calls"/);
+  assert.match(iss.description, /used=2, max=2/);
+  assert.equal(validateJournalEntry(iss).valid, true);
 });
 
 test('capability manifests are valid under the existing validator, carry undo (R1), and are written for the run', async () => {

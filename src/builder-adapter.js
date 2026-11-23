@@ -8,13 +8,15 @@ import { isFreeModel, checkBaseUrl } from './builder-config.js';
 import { makeRedactor, redactError } from './builder-redact.js';
 import { confine, ConfineError, isReadDenied } from './builder-confine.js';
 import { BUILDER_CAPABILITIES, validateCapabilities } from './builder-capabilities.js';
+import { createMeter, createSpendSink, GrantError, isMeter, loadPriceTable, DEFAULT_MAX_OUTPUT_TOKENS } from './grant/index.js';
 
 /** Documented exit codes. */
-export const EXIT = Object.freeze({ OK: 0, FAILED: 1, REFUSED: 2, RATE_LIMITED: 3 });
+/** GRANT_EXCEEDED (4): the grant's budget, tool-call limit or expiry ran out mid-run (or the clock went backwards); work so far is committed. */
+export const EXIT = Object.freeze({ OK: 0, FAILED: 1, REFUSED: 2, RATE_LIMITED: 3, GRANT_EXCEEDED: 4 });
 export const LIMITS = Object.freeze({ MAX_MALFORMED_IN_ROW: 3, MAX_TRUNCATIONS: 1, MAX_FILE_BYTES: 200000, MAX_READ_BYTES: 50000 });
 const PROTECTED_BRANCHES = new Set(['main', 'master', 'develop']);
 
-/** Where the contract was awkward for this builder. Journaled once per run as issues of kind `contract-gap` (14 entries: the 8 first logged, 5 found by review, and the self-model capabilities field). */
+/** Where the contract was awkward for this builder. Journaled once per run as issues of kind `contract-gap` (15 entries: the 8 first logged, 5 found by review, the self-model capabilities field, and spend records). */
 export const CONTRACT_GAPS = Object.freeze([
   { file: 'schemas/v1/run-journal-entry.schema.json', reason: 'issue entries have no `kind` field (category is bug/risk/improvement and unevaluatedProperties is false), so rate-limit and contract-gap kinds are encoded as a "[kind: X]" prefix in the description.' },
   { file: 'schemas/v1/run-journal-entry.schema.json', reason: 'there is no failure entry kind; failures are recorded as an `attempt` with outcome "failed" (or "blocked").' },
@@ -24,12 +26,13 @@ export const CONTRACT_GAPS = Object.freeze([
   { file: 'src/self-model.js', reason: 'the self-model indexes only top-level src/*.js modules and has no capabilities field, so the builder capability manifests cannot be listed there.' },
   { file: 'schemas/v1/capability-manifest.schema.json', reason: 'there is no registry or place to publish manifests; the adapter validates them and writes them to .agent-runs/<run_id>.capabilities.json.' },
   { file: 'schemas/v1/ (all contracts)', reason: 'there is no role concept anywhere in the contract (builder vs overseer, rule R2); the adapter enforces role "builder" in its own config only and nothing in the contract can express or verify it.' },
-  { file: 'schemas/v1/grant.schema.json', reason: 'budget.max_usd is required but the contract defines no metering or price source, so the adapter cannot enforce it; only budget.max_tool_calls is enforced.' },
-  { file: 'schemas/v1/grant.schema.json', reason: 'expires_at is checked once at run start; the contract says nothing about mid-run expiry or a wall-clock cap, so a long run can outlive its grant.' },
+  { file: 'schemas/v1/grant.schema.json', reason: 'budget.max_usd is required but the contract defines no metering or price source, so the adapter enforces it with its own meter (src/grant/, integer micro-USD, tracked price table); another consumer of a grant would have to re-implement that.' },
+  { file: 'schemas/v1/grant.schema.json', reason: 'expires_at is checked once at run start; the contract says nothing about mid-run expiry or a wall-clock cap, so a long run can outlive its grant. The adapter now also checks expiry before every model call and tool call; the contract still says nothing about it.' },
   { file: 'schemas/v1/grant.schema.json', reason: 'allowed_risk_tiers has no defined meaning or ordering for a builder; the adapter only checks that "low" is included, and does not compare per-capability risk tiers against the list.' },
   { file: 'schemas/v1/capability-manifest.schema.json', reason: 'scopes are free-form strings with no vocabulary, so the adapter invented its own scope strings (for example repo:write:task-worktree) that nothing else can interpret or check against a grant.' },
   { file: 'schemas/v1/run-journal-entry.schema.json', reason: 'a model refusal and a truncated response have no representation in the contract; they are journaled as an attempt (blocked or failed) plus an issue with a "[kind: refusal]" or "[kind: truncation]" prefix.' },
   { file: 'schemas/v1/self-model.schema.json', reason: 'the self-model schema and generator (scripts/build-self-model.js) have no field for adapter capabilities, so builder modules are listed without their capabilities. Not extended in this task; Kevin decides whether to add the field.' },
+  { file: 'schemas/v1/run-journal-entry.schema.json', reason: 'no journal entry kind can hold a structured spend record (reserve/settle amounts, token counts, cost source); spend is written to an append-only sidecar .agent-runs/<run_id>.spend.jsonl and referenced from the journal instead.' },
 ]);
 
 const SYSTEM_PROMPT = [
@@ -127,7 +130,8 @@ export async function runBuilder({ config, task }, opts = {}) {
   let seq = 0;
   let runDir = null;
   const written = new Set();
-  const result = { run_id: runId, status: 'failed', exit_code: EXIT.FAILED, commit: null, files_written: [], journal_path: null, capabilities_path: null };
+  let meter = null;
+  const result = { run_id: runId, status: 'failed', exit_code: EXIT.FAILED, commit: null, files_written: [], journal_path: null, capabilities_path: null, spend_path: null };
 
   const clean = (v) => (typeof v === 'string' ? redact(v) : v);
   const rec = (entry) => {
@@ -178,6 +182,16 @@ export async function runBuilder({ config, task }, opts = {}) {
     if (!g.valid) return refuse(`grant invalid: ${g.errors.join('; ')}`);
     if (Date.parse(task.grant.expires_at) <= (opts.now ?? Date.now)()) return refuse('grant has expired');
     if (!task.grant.scope.repos.includes(repoName) && !task.grant.scope.repos.includes(task.repo)) return refuse(`repo "${repoName}" is not in the grant's scope`);
+    // Grant meter (R3): built before any network call. A grant the meter cannot use, or a paid model with no trusted price, refuses here.
+    const prices = opts.priceTable ?? loadPriceTable().table;
+    try {
+      if (!runDir) return refuse('cannot create the run directory for the append-only spend record; refusing (fail closed)');
+      meter = createMeter(task.grant, { now: opts.now ?? Date.now, priceTable: prices, model: config.model, sink: createSpendSink(join(runDir, `${runId}.spend.jsonl`), redact) });
+      result.spend_path = join(runDir, `${runId}.spend.jsonl`);
+      attempt('spend record', 'ok', `every reserve and settle is appended to .agent-runs/${runId}.spend.jsonl (sidecar; the journal schema cannot hold spend)`);
+    } catch (err) {
+      return refuse(`grant meter refused: ${err instanceof GrantError ? err.message : 'could not start the meter'}`);
+    }
     if (!task.grant.allowed_risk_tiers.includes('low')) return refuse('grant does not allow risk tier low');
     if (!existsSync(workdir)) return refuse('workdir does not exist');
     let branch;
@@ -196,35 +210,18 @@ export async function runBuilder({ config, task }, opts = {}) {
     result.capabilities = BUILDER_CAPABILITIES.map((c) => c.name);
 
     // ---- Tool-using loop ----
-    const budget = task.grant.budget.max_tool_calls;
-    let toolCalls = 0; let malformedInRow = 0; let truncations = 0; let steps = 0;
+    let malformedInRow = 0; let truncations = 0; let steps = 0;
     const messages = [{ role: 'system', content: SYSTEM_PROMPT }, { role: 'user', content: task.goal }];
     const allowed = task.grant.scope.paths;
 
-    const runTool = (name, args) => {
-      if (name === 'read_file') {
-        const { abs } = confine(workdir, args.path);
-        // Open first, check it is a regular file, then read at most MAX_READ_BYTES (no whole-file read, no FIFO hang).
-        const fd = openSync(abs, 'r');
-        try {
-          if (!fstatSync(fd).isFile()) throw new ConfineError('not a regular file');
-          const buf = Buffer.alloc(LIMITS.MAX_READ_BYTES);
-          const n = readSync(fd, buf, 0, LIMITS.MAX_READ_BYTES, 0);
-          return buf.subarray(0, n).toString('utf8');
-        } finally { closeSync(fd); }
-      }
-      if (name === 'list_dir') {
-        const { abs } = confine(workdir, args.path, { allowRoot: true });
-        return readdirSync(abs).filter((n) => n !== '.agent-runs' && !isReadDenied(n)).sort().map((n) => (statSync(join(abs, n)).isDirectory() ? `${n}/` : n)).join('\n');
-      }
-      const { abs, rel } = confine(workdir, args.path, { write: true, allowedPaths: allowed });
-      if (Buffer.byteLength(args.content) > LIMITS.MAX_FILE_BYTES) throw new ConfineError('file too large');
-      mkdirSync(dirname(abs), { recursive: true });
-      writeFileSync(abs, args.content);
-      written.add(rel);
-      return `wrote ${rel} (${Buffer.byteLength(args.content)} bytes)`;
-    };
+    const toolCtx = { workdir, allowed, written };
 
+    /** Journal which limit stopped the run, with the numbers. Used for every grant-exceeded stop. */
+    const recordGrantStop = (err) => {
+      const n = Object.entries(err.numbers ?? {}).map(([k, v]) => `${k}=${v}`).join(', ');
+      attempt('grant check', 'blocked', `grant limit "${err.limit}" reached: ${err.message}${n ? ` (${n})` : ''}`);
+      issue('grant-exceeded', 'risk', 'high', `Grant limit "${err.limit}" exceeded: ${err.message}${n ? ` (${n})` : ''}. Work so far is committed on the branch.`, 'Review the work on the branch; issue a new grant with a larger budget or expiry if the task should continue. The agent cannot extend its own grant.');
+    };
     const stop = (status, code, why) => { commitWork(status); return finish(status, code); };
     const commitWork = (status) => {
       if (written.size === 0) return;
@@ -243,8 +240,8 @@ export async function runBuilder({ config, task }, opts = {}) {
 
     for (;;) {
       steps += 1;
-      const call = await requestModel({ config, messages, fetchFn, sleep, redact, rec: { attempt, issue }, step: steps });
-      if (call.stop) return stop(call.stop.status, call.stop.code);
+      const call = await callModel({ meter, config, messages, fetchFn, sleep, redact, rec: { attempt, issue }, step: steps });
+      if (call.stop) { if (call.stop.grant) recordGrantStop(call.stop.grant); return stop(call.stop.status, call.stop.code); }
       const { choice } = call;
       const msg = choice.message ?? {};
       const finishReason = choice.finish_reason;
@@ -296,16 +293,12 @@ export async function runBuilder({ config, task }, opts = {}) {
           continue;
         }
         malformedInRow = 0;
-        if (toolCalls >= budget) {
-          attempt(`tool ${name}`, 'blocked', `grant budget of ${budget} tool calls exhausted`);
-          return stop('failed', EXIT.FAILED);
-        }
-        toolCalls += 1;
         try {
-          const out = runTool(name, args);
+          const out = dispatchTool(meter, toolCtx, name, args);
           attempt(`tool ${name} ${args.path}`, 'ok', String(out).split('\n')[0].slice(0, 120));
           reply(out);
         } catch (err) {
+          if (err instanceof GrantError) { recordGrantStop(err); return stop('grant-exceeded', EXIT.GRANT_EXCEEDED); }
           const blocked = err instanceof ConfineError && err.blocked;
           attempt(`tool ${name} ${String(args.path).slice(0, 80)}`, blocked ? 'blocked' : 'failed', redactError(err, redact).message.slice(0, 200));
           reply(`ERROR: ${err.message}`);
@@ -317,6 +310,52 @@ export async function runBuilder({ config, task }, opts = {}) {
     try { attempt('run', 'failed', `unexpected error: ${safe.message.slice(0, 300)}`); } catch { /* journal itself broken */ }
     result.error = safe.message;
     return finish('failed', EXIT.FAILED);
+  }
+}
+
+/**
+ * The single tool-dispatch chokepoint. Every tool (read_file, write_file, list_dir) runs only through here, and only after the
+ * meter has checked expiry and counted the call against max_tool_calls. Without a real meter it throws before touching anything.
+ */
+export function dispatchTool(meter, { workdir, allowed, written }, name, args) {
+  if (!isMeter(meter)) throw new GrantError('grant', 'no grant meter: refusing to run a tool');
+  meter.checkTool();
+  if (name === 'read_file') {
+    const { abs } = confine(workdir, args.path);
+    // Open first, check it is a regular file, then read at most MAX_READ_BYTES (no whole-file read, no FIFO hang).
+    const fd = openSync(abs, 'r');
+    try {
+      if (!fstatSync(fd).isFile()) throw new ConfineError('not a regular file');
+      const buf = Buffer.alloc(LIMITS.MAX_READ_BYTES);
+      const n = readSync(fd, buf, 0, LIMITS.MAX_READ_BYTES, 0);
+      return buf.subarray(0, n).toString('utf8');
+    } finally { closeSync(fd); }
+  }
+  if (name === 'list_dir') {
+    const { abs } = confine(workdir, args.path, { allowRoot: true });
+    return readdirSync(abs).filter((n) => n !== '.agent-runs' && !isReadDenied(n)).sort().map((n) => (statSync(join(abs, n)).isDirectory() ? `${n}/` : n)).join('\n');
+  }
+  if (name !== 'write_file') throw new ConfineError('unknown tool', true);
+  const { abs, rel } = confine(workdir, args.path, { write: true, allowedPaths: allowed });
+  if (Buffer.byteLength(args.content) > LIMITS.MAX_FILE_BYTES) throw new ConfineError('file too large');
+  mkdirSync(dirname(abs), { recursive: true });
+  writeFileSync(abs, args.content);
+  written.add(rel);
+  return `wrote ${rel} (${Buffer.byteLength(args.content)} bytes)`;
+}
+
+/**
+ * The single model-call chokepoint: the only function in src/ that reaches the endpoint. It reserves the worst-case cost
+ * (clamping max_tokens) before each request and settles after it. Without a real meter it returns a refusal before any network call.
+ * Returns { choice } or { stop: {status, code, grant?} }.
+ */
+export async function callModel(args) {
+  if (!isMeter(args?.meter)) return { stop: { status: 'grant-exceeded', code: EXIT.GRANT_EXCEEDED, grant: new GrantError('grant', 'no grant meter: refusing to call the model') } };
+  try {
+    return await requestModel(args);
+  } catch (err) {
+    if (err instanceof GrantError) return { stop: { status: 'grant-exceeded', code: EXIT.GRANT_EXCEEDED, grant: err } };
+    throw err;
   }
 }
 
@@ -336,13 +375,16 @@ export function parseRetryAfter(v, now = Date.now()) {
  * issue of kind rate-limit and returns exit code RATE_LIMITED.
  * Returns { choice } or { stop: {status, code} } after journaling why.
  */
-async function requestModel({ config, messages, fetchFn, sleep, rec, redact, step }) {
-  const body = { model: config.model, messages, tools: TOOLS };
+async function requestModel({ meter, config, messages, fetchFn, sleep, rec, redact, step }) {
+  const body = { model: config.model, messages, tools: TOOLS, usage: { include: true } };
   if (Object.keys(config.provider).length) body.provider = config.provider;
   const rl = config.rate_limit;
   let retries = 0;
   for (;;) {
     let res; let text;
+    // Reserve the worst case first (expiry, budget, clock are checked here); a refusal throws a GrantError before any network call.
+    const reservation = meter.reserve({ model: config.model, input: { messages, tools: TOOLS }, max_tokens: DEFAULT_MAX_OUTPUT_TOKENS });
+    body.max_tokens = reservation.max_tokens;
     try {
       res = await fetchFn(`${config.base_url}/chat/completions`, {
         method: 'POST',
@@ -353,12 +395,14 @@ async function requestModel({ config, messages, fetchFn, sleep, rec, redact, ste
       });
       text = await res.text();
     } catch (err) {
+      meter.settle(reservation, null); // the request may have been billed: worst case
       rec.attempt(`model step ${step}`, 'failed', `network error: ${redactError(err, redact).message.slice(0, 200)}`);
       return { stop: { status: 'failed', code: EXIT.FAILED } };
     }
     let json = null;
     try { json = JSON.parse(text); } catch { /* non-JSON body */ }
     if (!res.ok) {
+      meter.release(reservation, `http ${res.status}`); // rejected by the provider: nothing was generated
       const detail = redact(String(json?.error?.message ?? text).slice(0, 200));
       const dailyCap = /per[- ]day|daily/i.test(detail);
       if (res.status === 429 || dailyCap) {
@@ -379,6 +423,7 @@ async function requestModel({ config, messages, fetchFn, sleep, rec, redact, ste
       rec.attempt(`model step ${step}`, 'failed', notFound ? `model not found or unavailable (HTTP ${res.status}): ${detail}` : `HTTP ${res.status}: ${detail}`);
       return { stop: { status: 'failed', code: EXIT.FAILED } };
     }
+    meter.settle(reservation, json?.usage);
     const choice = json?.choices?.[0];
     if (!choice || typeof choice !== 'object') {
       rec.attempt(`model step ${step}`, 'failed', 'response has no choices (malformed)');

@@ -4,7 +4,7 @@ import { execFileSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { loadConfig } from '../src/builder-config.js';
 import { runBuilder, EXIT, parseGithubRemote, remoteRepos } from '../src/builder-adapter.js';
-import { startMock, reply, happyScript, tempRepo, makeGrant, FAKE_KEY } from './builder-mock.js';
+import { startMock, reply, happyScript, tempRepo, makeGrant, FAKE_KEY, TEST_PRICES } from './builder-mock.js';
 
 async function run({ model = 'vendor-b/model-b:free', repo = 'agent-core', remote, mutate, env = {} }) {
   const dir = remote === undefined ? tempRepo() : tempRepo('task/mock', remote);
@@ -12,7 +12,7 @@ async function run({ model = 'vendor-b/model-b:free', repo = 'agent-core', remot
   const mock = await startMock((_r, n) => happyScript(n));
   try {
     const config = loadConfig({ env: { OPENROUTER_API_KEY: FAKE_KEY, AGENT_BUILDER_MODEL: model, AGENT_BUILDER_BASE_URL: mock.url, ...env }, cwd: tmpdir() });
-    const result = await runBuilder({ config, task: { repo, goal: 'Write docs/hello.md', grant: makeGrant({ scope: { repos: [...new Set([repo, 'agent-core'])], paths: ['docs/'] } }), workdir: dir } });
+    const result = await runBuilder({ config, task: { repo, goal: 'Write docs/hello.md', grant: makeGrant({ scope: { repos: [...new Set([repo, 'agent-core'])], paths: ['docs/'] } }), workdir: dir } }, { priceTable: TEST_PRICES });
     if (result.status === 'refused' && process.env.DBG) console.log(result.summary);
     return { result, requests: mock.requests.length };
   } finally { await mock.close(); }

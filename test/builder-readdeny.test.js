@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { loadConfig } from '../src/builder-config.js';
 import { runBuilder, EXIT } from '../src/builder-adapter.js';
 import { confine, ConfineError, isReadDenied } from '../src/builder-confine.js';
-import { startMock, toolCall, reply, tempRepo, makeGrant, FAKE_KEY } from './builder-mock.js';
+import { startMock, toolCall, reply, tempRepo, makeGrant, FAKE_KEY, TEST_PRICES } from './builder-mock.js';
 
 const SECRET = 'TOP-SECRET-CONTENT-123';
 function repoWithSecrets() {
@@ -37,7 +37,7 @@ test('read denylist: through the adapter, each refusal is journaled as a failed 
   const mock = await startMock((_r, n) => (n === 1 ? reply({ tool_calls: calls }, 'tool_calls') : reply({ content: 'done' })));
   try {
     const config = loadConfig({ env: { OPENROUTER_API_KEY: FAKE_KEY, AGENT_BUILDER_BASE_URL: mock.url, AGENT_BUILDER_MODEL: 'vendor-a/model-a' }, cwd: tmpdir() });
-    const result = await runBuilder({ config, task: { repo: 'agent-core', goal: 'g', grant: makeGrant({ budget: { max_usd: 1, max_tool_calls: 100 } }), workdir: dir } });
+    const result = await runBuilder({ config, task: { repo: 'agent-core', goal: 'g', grant: makeGrant({ budget: { max_usd: 1, max_tool_calls: 100 } }), workdir: dir } }, { priceTable: TEST_PRICES });
     assert.equal(result.status, 'completed');
     assert.equal(result.exit_code, EXIT.OK);
     const failed = result.entries.filter((e) => e.kind === 'attempt' && e.outcome === 'failed' && /^tool (read_file|list_dir)/.test(e.tried));
@@ -57,7 +57,7 @@ test('read denylist: list_dir hides secrets and git internals; reads cap at the 
   const mock = await startMock((_r, n) => (n === 1 ? reply({ tool_calls: calls }, 'tool_calls') : reply({ content: 'done' })));
   try {
     const config = loadConfig({ env: { OPENROUTER_API_KEY: FAKE_KEY, AGENT_BUILDER_BASE_URL: mock.url }, cwd: tmpdir() });
-    await runBuilder({ config, task: { repo: 'agent-core', goal: 'g', grant: makeGrant({ budget: { max_usd: 1, max_tool_calls: 20 } }), workdir: dir } });
+    await runBuilder({ config, task: { repo: 'agent-core', goal: 'g', grant: makeGrant({ budget: { max_usd: 1, max_tool_calls: 20 } }), workdir: dir } }, { priceTable: TEST_PRICES });
     const [l1, l2, r1, r2] = mock.requests[1].body.messages.filter((m) => m.role === 'tool').map((m) => m.content);
     const l1Names = l1.split('\n').map((n) => n.replace(/\/$/, ''));
     for (const hidden of ['.env', '.git', '.ssh', '.aws', '.agent-builder.local.json', '.npmrc']) assert.ok(!l1Names.includes(hidden), hidden);
@@ -74,7 +74,7 @@ test('list_dir accepts the repository root (., ./, empty) but hides .git and den
   const mock = await startMock((_r, n) => (n === 1 ? reply({ tool_calls: calls }, 'tool_calls') : reply({ content: 'done' })));
   try {
     const config = loadConfig({ env: { OPENROUTER_API_KEY: FAKE_KEY, AGENT_BUILDER_BASE_URL: mock.url }, cwd: tmpdir() });
-    await runBuilder({ config, task: { repo: 'agent-core', goal: 'g', grant: makeGrant({ budget: { max_usd: 1, max_tool_calls: 20 } }), workdir: dir } });
+    await runBuilder({ config, task: { repo: 'agent-core', goal: 'g', grant: makeGrant({ budget: { max_usd: 1, max_tool_calls: 20 } }), workdir: dir } }, { priceTable: TEST_PRICES });
     const outs = mock.requests[1].body.messages.filter((m) => m.role === 'tool').map((m) => m.content);
     assert.equal(outs.length, 3);
     for (const out of outs) {
