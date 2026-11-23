@@ -1,5 +1,74 @@
 # LOG
 
+## 2026-11-23 (Additive contract gap cleanup)
+### What was done
+Branch task/contract-gaps off origin/main a797766 (`.github/locked-paths.txt` there lists `src/ledger/`; checked). One commit per issue. Only schemas/, docs/adr/, fixtures/, src/self-model.js, self-model.json, new tests, README.md and LOG.md changed.
+1. Issue kind (889fb85): optional `issue_kind` on issue entries, pattern `^[a-z][a-z0-9]*(-[a-z0-9]+)*$`, max 64 chars, not an enum. NOT named `kind`: `kind` is already the entry discriminator (`reservation`/`attempt`/`issue`), so a second `kind` is impossible. Valid and invalid fixtures; new `test/contract-gaps-journal.test.js`. Note: this commit's schema diff also already contains the item 2 enum change (my commit split slipped); the item 2 commit carries its fixtures and test.
+2. Attempt outcomes (ad8768b): `outcome` enum is now ok, failed, blocked, refused, truncated. Fixtures for both plus a wrong-case invalid one; new `test/contract-gaps-outcomes.test.js`.
+3. Task spec (5ce2ea8): new `schemas/v1/task-spec.schema.json` (goal, repo `host/owner/name`, optional branch, exactly one of embedded `grant` (refs the grant schema) or `grant_ref`), ADR-0006, 2 valid and 9 invalid fixtures, `test/task-spec.test.js`. Acceptance test untouched and still passes (its contract list is hardcoded and does not include task-spec; the one-ADR-per-contract check lives in unlocked `test/self-model.test.js`, 6 contracts and 6 ADRs).
+4. max_usd decimal string: NOT DONE, reverted before any commit (see Decisions). No schema change.
+5. Semantics doc (b8bbf5a): addendum to `docs/adr/0004-grant.md` documenting what the adapter and meter do today for `scope.repos`, `scope.paths`, `allowed_risk_tiers`, scope vocabulary and `budget`; `test/grant-semantics-doc.test.js` pins the path rules (characterization only). Finding stated as fact: entries like `src/**` (used in the valid grant fixture) are literal prefixes and allow no writes today.
+6. Self-model (9f2eda8): generator now indexes `.js` files under `src/` at any depth (name `grant/meter`, path `src/grant/meter.js`; 8 modules became 20), sorted by path. Optional per-module `capabilities` (name, version, risk_tier, sorted scopes) filled from the `*_CAPABILITIES` export of `src/*-capabilities.js` (only `builder-capabilities` today), otherwise omitted. Schema additive. ADR-0005 addendum. `self-model.json` regenerated. New `test/self-model-nested.test.js`, new valid and invalid self-model fixtures.
+7. Gap table below.
+README.md updated (task-spec, self-model line).
+
+### Commands run and results (with counts)
+- Baseline origin/main a797766 `npm test`: 362 tests, 362 pass, 0 fail, 0 skipped on Node 24.22.3 and on Node 22.23.5.
+- Final `npm test`: 400 tests, 400 pass, 0 fail, 0 skipped on Node 22.23.5 and 400/400/0/0 on Node 24.22.3 (+38 new; no skips added).
+- `npm run build`: wrote self-model.json (20 modules, 6 contracts, 6 ADRs). `npm run check:self-model`: up to date. Generator run twice, outputs byte-identical (cmp). `npm audit --omit=dev`: 0 vulnerabilities.
+- Backward compatibility: all 362 baseline tests (which validate every pre-existing fixture across all 5 contracts) still pass unedited except the one listing below; `test/contract-gaps-journal.test.js` names the 4 old valid and 6 old invalid journal fixtures explicitly; `test/self-model-nested.test.js` checks the old self-model shape still validates. Grant schema unchanged.
+- Item 4 probe: `createMeter` with `max_usd: 0.05` accepts (budget_micro 50000); with `'0.05'` refuses `grant budget.max_usd is missing or invalid`.
+
+### Decisions and why
+- `issue_kind` instead of `kind` (name collision, see item 1). Restrictive and non-breaking.
+- Item 4 reverted: `src/grant/money.js` `usdToMicro` does parse decimal strings exactly (existing test), but `src/grant/meter.js` line 66 requires `typeof max_usd === 'number'`, so the meter refuses the string form. Accepting it needs a locked-code edit. Allowing the string in the schema alone would pass validation and then fail at the meter, so the schema was left as is.
+- `repo` in task-spec requires a host with a dot (`github.com/owner/name`); stricter than the adapter, which accepts a bare name or path. `workdir` left out (local path, not a task property).
+- Self-model capabilities come from loading `src/builder-capabilities.js` (top-level await in the generator); a failure to load omits the field instead of failing the build. Chosen over inventing a manifest directory convention.
+- No change to the adapter's runtime `CONTRACT_GAPS` list (locked); it still reports gaps now closed in the contract.
+
+### Gap table (CLOSED / NEEDS LOCKED CODE / NEEDS VERSIONED SCHEMA CHANGE / DECISION FOR KEVIN)
+Runtime list is the 15 in `src/builder-adapter.js` `CONTRACT_GAPS` (in order), then the extra gaps named in the "Grant metering and expiry" and "Per grant spend ledger" sections.
+| # | Gap | Status |
+|---|-----|--------|
+| 1 | Issue entries have no `kind` | CLOSED here (889fb85, field `issue_kind`). Adapter still writes the `[kind: x]` prefix: adopting the field NEEDS LOCKED CODE (src/builder-adapter.js). |
+| 2 | No failure entry kind (attempt failed/blocked) | DECISION FOR KEVIN: `attempt` failed/blocked/refused/truncated now covers it; a separate failure entry kind would be a new kind every reader must handle. |
+| 3 | No task-spec schema | CLOSED here (5ce2ea8, ADR-0006). Adapter adoption NEEDS LOCKED CODE (src/builder-adapter.js). |
+| 4 | `scope.paths` semantics unspecified | Documented (b8bbf5a), not closed. DECISION FOR KEVIN: define globs or keep prefixes; any change NEEDS LOCKED CODE (src/builder-confine.js). |
+| 5 | Journal guarantee in-process only; adapter mirror unprotected | DECISION FOR KEVIN (durable append-only journal storage; NEEDS LOCKED CODE in the adapter). |
+| 6 | Self-model indexes only top-level `src/*.js` | CLOSED here (9f2eda8). |
+| 7 | No registry for capability manifests | DECISION FOR KEVIN. Partial: the self-model now lists the builder manifests, but there is still no registry or publish path. |
+| 8 | No role concept (builder vs overseer) | DECISION FOR KEVIN (out of scope; a field only helps if locked meter/adapter read it). |
+| 9 | `max_usd` has no metering or price source in the contract | DECISION FOR KEVIN (metering lives in locked src/grant/; budget semantics documented in the ADR-0004 addendum). |
+| 10 | `expires_at` checked at start, no mid-run or wall-clock semantics in the contract | DECISION FOR KEVIN (the adapter and meter already check before every call; the contract still says nothing). |
+| 11 | `allowed_risk_tiers` has no defined meaning | Documented today's behaviour (only `low` is checked; `payments` exists in the enum). DECISION FOR KEVIN on real semantics; enforcement NEEDS LOCKED CODE. |
+| 12 | Capability `scopes` free-form, no vocabulary | Documented. DECISION FOR KEVIN (a vocabulary is a versioned change if it becomes an enum or pattern). |
+| 13 | Refusal and truncation unrepresented | CLOSED here (ad8768b outcomes `refused`/`truncated`, plus 889fb85 `issue_kind`). Adapter adoption NEEDS LOCKED CODE. |
+| 14 | Self-model has no field for adapter capabilities | CLOSED here (9f2eda8). |
+| 15 | No journal entry kind for structured spend | NEEDS VERSIONED SCHEMA CHANGE: a structured spend entry is a new entry kind with money and token fields; the spend sidecar is in locked code. |
+| 16 | `task_id` not documented as the unique grant key (ledger relies on it) | DECISION FOR KEVIN (uniqueness cannot be enforced by a schema; ledger refuses a mutated grant already). |
+| 17 | Contract has no notion of a grant spanning runs, a run id or a spend ledger | NEEDS VERSIONED SCHEMA CHANGE (new run and ledger concepts) and is adapter-local today. |
+| 18 | `max_usd` is a float number; decimal string would be safer | NEEDS LOCKED CODE (src/grant/meter.js line 66 rejects non-numbers). Schema alternative deliberately not added. |
+| 19 | Self-model generator ignores subdirectories of `src/` | CLOSED here (9f2eda8). |
+| 20 | Spec C fix-round list (role, risk tiers, scope vocabulary, refusal/truncation, self-model capabilities) | Same as 8, 11, 12, 13, 14. |
+
+### Existing tests edited (and why)
+- `test/self-model.test.js`: the expected contract-name list gained `'task-spec'` (item 3, count/listing change). No other existing test file edited. `self-model.json` and `README.md` changed as generated or doc files.
+
+### CHANGED LOCKED PATHS (expected: none)
+None. `git diff --name-only origin/main...HEAD` lists nothing under src/grant/, src/ledger/, src/builder-adapter.js, src/builder-confine.js, src/validators.js, config/, acceptance/, .github/, CODEOWNERS or test/builder-mock.js.
+
+### Not verified
+- The locked-path guard on a real PR (not runnable here).
+- `builder:smoke`, live endpoints and real keys: not run by design.
+- Self-model generation on a case-sensitive or Windows filesystem was not run.
+
+### Open questions for Kevin
+- Rename wanted? The spec asked for `kind` on issue entries; shipped as `issue_kind` because `kind` is the entry discriminator.
+- Item 4: allow `max_usd` as a decimal string only together with a meter edit (src/grant/meter.js, locked)? Until then the schema stays number-only.
+- The valid grant fixture uses `src/**` and `docs/**`, which allow no writes under today's prefix semantics. Define glob support (locked src/builder-confine.js) or change what the fixtures and docs say?
+- Should the adapter be updated (locked) to use `issue_kind`, the new outcomes and the task-spec shape, and drop the matching runtime gap entries?
+- `task-spec.repo` requires `host/owner/name`; the adapter accepts bare names. Keep the stricter form?
+
 ## 2026-11-23 (Ledger fix round)
 ### What was done
 One commit per issue, only `src/ledger/`, ledger tests under `test/`, and this file changed.
