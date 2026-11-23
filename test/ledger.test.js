@@ -312,3 +312,16 @@ test('ledger operator errors: the clearing command quotes a path containing a si
   const base = mkdtempSync(join(tmpdir(), "ledger-q'uote-")); const lock = join(base, 'x.lock'); mkdirSync(lock); writeFileSync(join(lock, 'owner.json'), '{');
   assert.throws(() => acquireLock(lock, { timeoutMs: 50, pollMs: 5 }), (e) => e.message.includes(`rm -r '${base.replace(/'/g, `'\\''`)}/x.lock'`));
 });
+
+test('ledger lock wait: the timeout is honoured even with a long poll interval, and it sleeps rather than spins', () => {
+  const dir = tdir(); const l = openLedger(dir, { lockTimeoutMs: 120, lockPollMs: 5000 });
+  const r = l.openRun(grant(), 'run-1');
+  const lock = join(realpathSync.native(dir), `${files(dir)[0]}.lock`);
+  mkdirSync(lock); writeFileSync(join(lock, 'owner.json'), JSON.stringify({ pid: process.pid, at_ms: Date.now() }));
+  const t0 = Date.now(); const cpu0 = process.cpuUsage();
+  assert.throws(() => r.reserve({ micro: 1 }), /lock timeout on /);
+  const elapsed = Date.now() - t0; const cpu = process.cpuUsage(cpu0);
+  assert.ok(elapsed >= 100 && elapsed < 1500, `refused near the 120ms timeout, not after the 5000ms poll (took ${elapsed}ms)`);
+  assert.ok((cpu.user + cpu.system) / 1000 < elapsed * 0.6, 'the wait did not burn CPU');
+  assert.equal(lines(dir).length, 1);
+});

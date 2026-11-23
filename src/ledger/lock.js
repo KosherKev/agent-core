@@ -4,7 +4,10 @@ import { join, dirname } from 'node:path';
 import { LedgerError } from './format.js';
 import { writeAll, fsyncDir, realIo } from './durable.js';
 
-const sleepSync = (ms) => { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms); };
+// Atomics.wait on a private buffer nobody notifies: a real sleep (no CPU spin). It blocks this thread, which is deliberate: the
+// ledger API is synchronous (the meter calls it synchronously), so the wait cannot yield; it is bounded by timeoutMs.
+const WAIT_CELL = new Int32Array(new SharedArrayBuffer(4));
+const sleepSync = (ms) => { if (ms > 0) Atomics.wait(WAIT_CELL, 0, 0, ms); };
 
 export function defaultPidAlive(pid) {
   if (!Number.isSafeInteger(pid) || pid < 1) return false;
@@ -92,6 +95,6 @@ export function acquireLock(lockPath, { now = Date.now, timeoutMs = 5000, pollMs
       throw new LedgerError('ledger', `ledger lock ${lockPath} has been held by live pid ${owner.pid} for ${Math.round(heldMs / 1000)}s, longer than the ${Math.round(maxAgeMs / 1000)}s maximum (a hung run, or the pid was reused by another program). It is NOT broken automatically. Check that pid ${owner.pid} is really an agent run (ps -p ${owner.pid}); if it is hung, stop it, then clear the lock by hand with: ${clearCommand(lockPath)}; refusing`);
     }
     if (Date.now() >= deadline) throw new LedgerError('ledger', `ledger lock timeout on ${lockPath}; refusing`);
-    sleepSync(pollMs);
+    sleepSync(Math.min(pollMs, Math.max(0, deadline - Date.now()))); // never sleep past the deadline
   }
 }
