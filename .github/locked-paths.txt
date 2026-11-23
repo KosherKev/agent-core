@@ -2,3 +2,9 @@
 # A trailing slash means "everything under this directory".
 acceptance/
 .github/
+src/grant/
+config/
+src/builder-adapter.js
+src/builder-confine.js
+test/grant-meter.test.js
+test/grant-adapter.test.js

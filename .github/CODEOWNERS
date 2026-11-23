@@ -2,3 +2,9 @@
 # Keep in sync with .github/locked-paths.txt (the acceptance suite checks this).
 /acceptance/ @KosherKev
 /.github/ @KosherKev
+/src/grant/ @KosherKev
+/config/ @KosherKev
+/src/builder-adapter.js @KosherKev
+/src/builder-confine.js @KosherKev
+/test/grant-meter.test.js @KosherKev
+/test/grant-adapter.test.js @KosherKev
