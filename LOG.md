@@ -43,3 +43,20 @@
   - The guard cannot run from a base that lacks it, so the first PR into an empty main has no base to guard against.
 - Status: complete on branch task/contracts-and-schemas, awaiting review. Not merged.
 - Next step: Kevin reviews the locked-path changes above first, enables branch protection with this check and Code Owner review required, and merges manually.
+
+## 2026-11-23 (guard symlink fail-open fix)
+- Files touched: .github/scripts/locked-paths.mjs, test/ci-locked-paths.test.js, docs/adr/0003-run-journal.md (one line added to the guard addendum), LOG.md
+- CHANGED LOCKED PATHS (review these first):
+  - .github/scripts/locked-paths.mjs (raw-mode diff with --no-abbrev, symlink-aware resolution of changed paths and symlink targets, fail-closed main with exit 2, realpath entry-point check)
+  - acceptance/, .github/workflows/protect-locked-paths.yml, .github/CODEOWNERS, .github/locked-paths.txt: no changes.
+- What changed: the guard parses `git diff --raw -z --no-renames --no-abbrev` and rejects (a) any change at or under a locked path including symlink add/change/type-change/removal, (b) any changed path or symlink target whose real path lands in a locked path (symlink chains and symlinked parents followed lexically within the repo), and (c) fails closed with exit 2 on bad refs, git errors, unexpected git output, absolute or repo-escaping symlink targets. The entry-point check compared argv[1] to import.meta.url as strings, so invoking the guard through a symlink skipped it and exited 0; now realpath-compared. 20 new temp-repo CLI tests.
+- Acceptance criteria (pass/fail each):
+  - symlink under a locked dir, outside symlink into a locked dir, locked file replaced by symlink all fail the guard: PASS (old guard already failed closed on the first and third because it matched on path names; it failed open on a new or retargeted outside symlink into a locked dir, on symlinked invocation, and on unresolvable targets)
+  - unresolvable path or git error makes the guard fail: PASS
+  - existing tests incl. rename, delete, add still pass: PASS (109 tests, 0 failures: 89 existing + 20 new)
+  - build, check:self-model, npm audit --omit=dev clean: PASS
+  - LOG.md and ADR addendum updated: PASS
+- Deviations: git never follows symlinks, so a write made through an outside symlink is recorded under the real locked path and was already caught; that case is kept as regression coverage. Tests and the symlink fix share the first commit. Workflow YAML untouched. Other review findings left out of scope.
+- Status: complete on branch task/contracts-and-schemas, awaiting review. Not merged.
+- Next step: Kevin reviews the locked guard change first.
+
