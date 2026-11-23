@@ -3,10 +3,12 @@ import { resolve, sep, dirname, isAbsolute, relative } from 'node:path';
 
 /**
  * Paths the builder may never write, regardless of grant: R4 (acceptance/, .github/ which holds the guard
- * script and CODEOWNERS), the locked validators, any CODEOWNERS file, the git directory and adapter-owned
+ * script and CODEOWNERS), the locked validators, the grant meter, price table and grant files, any CODEOWNERS file, the git directory and adapter-owned
  * state. package.json is deliberately NOT locked yet.
  */
-export const ALWAYS_LOCKED = ['acceptance/', '.github/', 'CODEOWNERS', 'src/validators.js', '.git/', '.agent-runs/', '.agent-builder.local.json'];
+export const ALWAYS_LOCKED = ['acceptance/', '.github/', 'CODEOWNERS', 'src/validators.js', '.git/', '.agent-runs/', '.agent-builder.local.json',
+  // Grant rules layer (R3/R4): the meter, the tracked price table (config/), grant files and grant fixtures. The agent must not edit the limits that bind it.
+  'src/grant/', 'config/', 'grant.json', 'grants/', 'fixtures/grant/'];
 
 export class ConfineError extends Error {
   constructor(message, blocked = false) { super(message); this.name = 'ConfineError'; this.blocked = blocked; }

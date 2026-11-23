@@ -1,5 +1,119 @@
 # LOG
 
+## 2026-11-23 (Meter cost and expiry fixes)
+
+### What was done
+- Cost rule (commit 2a563c6, `src/grant/meter.js` `settle`): for a paid model the settled cost is the higher of the provider-reported `usage.cost` and the cost computed from `usage` tokens and the price table. A reported 0, negative, non-finite, non-numeric or null cost is never trusted below computed (malformed values are dropped). Missing or unusable usage settles at the full reservation, even if a cost was reported (a reported cost with no token counts cannot be checked against the price table). `:free` models unchanged (valid reported cost, else 0). Spend-record `source` is `provider` when reported >= computed, else `computed`.
+- Strict expiry (commit 7ce6f7a): new `src/grant/expiry.js` `parseExpiry`. Confirmed first: the meter used `Date.parse` directly, which accepts locale strings and reads an offset-less timestamp as host-local time; the adapter preflight also used bare `Date.parse` (only the grant schema's `date-time` format check stood in front of both). Now both call `parseExpiry`: strict pattern `YYYY-MM-DDTHH:MM:SS[.f{1,9}](Z|+hh:mm|-hh:mm)`, upper-case `T`/`Z`, no padding, then explicit calendar range checks (month, days per month incl. leap years, hour 0-23, minute and second 0-59, offset hours 0-23 and minutes 0-59, year 1000-9999) before `Date.parse` on the validated string. Anything else refuses: meter `GrantError('grant')`, adapter preflight exit 2 before any network call. Past expiry at preflight still refuses.
+- Existing tests adjusted for the new rule: two tests settled a reported cost with no token counts (now worst case); they now include token counts.
+- Schema, guard, validators, acceptance, workflows, price table contents untouched.
+
+### Commands run and results (with counts)
+- Baseline f266fc5: 288 tests, 288 pass.
+- After commit 1 (cost): Node 24.22.3 296 tests, 296 pass (8 new).
+- After commit 2 (expiry), final: Node 24.22.3: `npm test` 303 tests, 303 pass, 0 fail, 0 skipped. Node 22.23.5: 303 tests, 303 pass, 0 fail, 0 skipped. 15 new tests in total.
+- `npm run build` clean (self-model unchanged); `npm run check:self-model` passes; `npm audit --omit=dev` found 0 vulnerabilities. No new dependencies.
+- Fail-before proof: the new `test/grant-meter.test.js` and `test/grant-adapter.test.js` run against an unmodified f266fc5 source copy (scratch dir, since removed): 6 failed, including "cost: a reported cost of 0 on a paid model settles at the computed cost", "cost: missing usage still settles at the worst-case reservation even with a reported cost", and the expiry tests for no offset, date-only, locale string and calendar-invalid date. They pass on this branch. The padded-string and preflight zero-request tests pass on f266fc5 too, because the grant schema check already refused those; the new tests lock that in at the meter and adapter level.
+
+### Decisions and why
+- SUPERSEDED: the earlier decision "Provider-reported cost is trusted over computed cost (the stated order of trust), including a reported 0" is replaced by: higher of reported and computed wins; a reported cost is never trusted below computed (Kevin's decision, 2026-11-23).
+- A numeric-looking string reported cost (for example "0.003") is still parsed; if higher than computed it is honoured, otherwise computed wins. Non-numeric strings are dropped.
+- Restrictive choices on expiry: leap second (:60) refused, lower-case `t`/`z` refused, years before 1000 refused, fractions beyond milliseconds truncated by `Date.parse` (rounds the expiry down, which is the safe direction).
+- `parseExpiry` is exported from `src/grant/index.js` and used by the adapter so there is a single parser.
+
+### What is NOT enforced after this task
+- Spend is only as good as the price table and provider data; no reconciliation against the provider's account.
+- Per-run budget only: meter state is in memory per run, the budget is per run, not per grant across runs. Two runs on the same grant each get the full budget. There is no shared ledger (a later spec).
+- Only `budget.max_usd`, `budget.max_tool_calls` and `expires_at` are metered; `scope` and risk tiers are not.
+- A provider that reports a cost lower than the truth AND omits token counts is settled at worst case; one that reports plausible token counts but lies about them is only as safe as those counts.
+- The meter cannot stop a request already in flight; the host clock is trusted (only a backwards jump over 1 s is caught).
+- The guard workflow on a real PR is unverified here.
+
+### CHANGED LOCKED PATHS (expected: none)
+- None. `git diff --name-only origin/main...HEAD` lists only LOG.md, README.md, config/prices.json, src/builder-adapter.js, src/builder-confine.js, src/grant/*, test/*; nothing under `acceptance/`, `.github/`, `schemas/`, nor `CODEOWNERS` or `src/validators.js`. (Local `main` is stale; origin/main is used as the base. This round touched `src/grant/` as the spec allows, plus `src/builder-adapter.js` for the preflight parse, and the two grant test files.)
+
+### Not verified
+- The CI guard on a real PR; any paid model against a real provider; `builder:smoke` (out of scope).
+
+### Open questions for Kevin
+- `src/builder-adapter.js` also changed (preflight now calls `parseExpiry`). It is not a locked path; consider locking it with `src/grant/`.
+- Should a reported cost with no token counts on a paid model ever be honoured when it is above zero but below the reservation? Settled at the worst case for now (more restrictive).
+
+## 2026-11-23 (Grant metering and expiry)
+
+### What was done
+- New `src/grant/` (lock as one unit): `meter.js` (`createMeter`, `GrantError`, `isMeter`), `money.js` (integer micro-USD, BigInt-exact, decimal-string conversion), `prices.js` (price table parser/loader, `:free` = 0), `spend-log.js` (append-only sidecar sink), `index.js`.
+- `config/prices.json`: tracked price table (`schema_version "1"`, per model `input_micro_per_mtok` / `output_micro_per_mtok`). It ships with NO paid models, so every paid model is refused until Kevin adds a price he trusts.
+- Meter: the grant is deep-copied and deep-frozen on entry; no setter exists; the meter object is frozen. `reserve(call)` checks expiry, prices the worst case (input tokens estimated as UTF-8 bytes of the serialised request, an upper bound, plus `max_tokens`), clamps `max_tokens` to the largest value that fits the remaining budget (exact integer search) or refuses. `settle` uses provider-reported `usage.cost`, else tokens x price, else (paid model, no usable usage) the full reservation. `release` returns a reservation at zero when the provider rejected the request with an HTTP error. `checkTool()` checks expiry then counts against `budget.max_tool_calls`. `checkExpiry()` refuses at or after `expires_at` and when the clock moves back by more than 1000 ms (or is non-finite). Any internal error becomes a refusal.
+- Adapter: `callModel` (the only function that reaches the endpoint) and `dispatchTool` (the only code that reads or writes the worktree) both require a real meter (`isMeter`, a WeakSet brand). `runBuilder` builds the meter in preflight from the run's own grant; a grant the meter cannot use, an unpriced paid model, or no run directory for the spend record all refuse (exit 2) before any network call. Requests now carry `max_tokens` (clamped) and `usage: {include: true}`.
+- Stop behaviour: any meter refusal mid-run commits work so far, journals an `attempt` (blocked) and an `issue` of kind `grant-exceeded` (limit name and numbers) and exits with the NEW exit code `EXIT.GRANT_EXCEEDED = 4` (status `grant-exceeded`). Rate limit stays 3.
+- Spend record: the run-journal schema has no entry kind that can hold structured spend, so every reserve/settle/release is appended to `.agent-runs/<run_id>.spend.jsonl` (one JSON line each, `appendFileSync` with the `a` flag, key-redacted), referenced from the journal by an `attempt`, and a 15th `contract-gap` issue is logged. The schema was NOT edited.
+- Write protection: `ALWAYS_LOCKED` in `src/builder-confine.js` now also covers `src/grant/`, `config/`, `grant.json`, `grants/`, `fixtures/grant/` (case, unicode and symlink folding as for the other entries).
+- README exit-code line updated. The two stale contract-gap texts (max_usd unenforced, expiry start-only) were reworded, keeping their original match phrases.
+
+### Commands run and results (with counts)
+- Baseline on origin/main (84bd114), Node 24: `npm test` 258 tests, 258 pass.
+- After the change, Node 24.22.3: `npm test` 288 tests, 288 pass, 0 fail, 0 skipped.
+- After the change, Node 22.23.5: `npm test` 288 tests, 288 pass, 0 fail, 0 skipped.
+- New tests: 30 (15 in `test/grant-meter.test.js`, 15 in `test/grant-adapter.test.js`). Existing tests changed: the old "tool calls beyond max_tool_calls" test now expects exit 4 and the new issue; the gaps test expects 15 gaps; test helpers pass a test price table (`TEST_PRICES` in `test/builder-mock.js`) to runs that use fake paid model ids. No tests skipped or removed.
+- `npm run build` clean (self-model unchanged); `npm run check:self-model` passes; `npm audit --omit=dev` 0 vulnerabilities. No new dependencies.
+- `git diff --name-only origin/main...HEAD` touches nothing under `acceptance/`, `.github/`, `schemas/`, nor `CODEOWNERS`, `src/validators.js`.
+- Every item-6 test exists under its own name: reservation refuses over budget; `max_tokens` clamped; settle provider vs computed; missing usage settles at worst case; budget exhausted mid-run exit 4; expiry mid-run (tool call and model call); clock backwards (meter and adapter); unknown paid model zero requests; `:free` still enforces tool calls and expiry; no way to mutate the grant; write tools refuse the grant file, price table and meter; float-rounding sum; key never in spend record. Plus the structural test (grep-based: one `fetchFn(` call site inside `requestModel`, reached only via `callModel`; no other source file can reach the network; filesystem tool operations only inside `dispatchTool` after `meter.checkTool()`) and a behavioural test (fake or prototype-forged meters make no request and run no tool).
+
+### Decisions and why (restrictive choices made without asking)
+- Empty price table: no paid model priced, rather than guessing real prices. A wrong price silently weakens the budget.
+- Input tokens estimated as bytes (upper bound), so budgets are conservative; real usage will be well under the reservation.
+- Budget `max_usd` is rounded DOWN to micro-USD; every cost is rounded UP.
+- Network error or timeout settles at the worst-case reservation (the request may have been billed). HTTP error responses release at zero (the provider rejected the request). Each 429 retry reserves and releases again.
+- If the spend record cannot be written, the run refuses (mid-run: the meter refuses); no unaudited spend.
+- (SUPERSEDED 2026-11-23, see the cost and expiry fixes section above: the higher of reported and computed cost now wins; a reported cost is never trusted below computed.) Provider-reported cost is trusted over computed cost (the stated order of trust), including a reported 0.
+- Every mid-run meter refusal (including clock backwards, internal error) uses exit 4, not 2; preflight refusals use exit 2.
+- Default `max_tokens` per call is 8192 (`DEFAULT_MAX_OUTPUT_TOKENS`); this now also applies to `:free` models, which previously sent no `max_tokens`.
+- Locked the whole of `config/` and `fixtures/grant/` for builder writes, broader than the two files named in the spec.
+- Only the grant's own `expires_at`, `max_usd`, `max_tool_calls` are used; no grant fields invented.
+
+### What is NOT enforced after this task
+- Spend is only as good as the price table and provider data: there is no independent check of what OpenRouter actually bills, and no reconciliation against the provider's account.
+- Only `budget.max_usd`, `budget.max_tool_calls` and `expires_at` are metered. `scope`, `allowed_risk_tiers` and per-capability risk tiers are not (see earlier gaps).
+- Meter state is in memory per run: the budget is per run, not per grant across runs. Two runs on the same grant each get the full budget. There is no shared ledger (out of scope).
+- The meter cannot stop a request already in flight; a single in-flight call can cost up to its reservation.
+- Wall-clock expiry relies on the host clock; only a backwards jump over 1 s is caught. A forward jump just expires the grant early.
+- The meter protects the builder adapter only. Nothing stops other code from calling the endpoint; the structural test covers `src/` only, and a future edit that adds a path can still pass if it also keeps those strings.
+- Locking `src/grant/`, `config/` is enforced for the adapter's write tools and (after Kevin's step below) by the CI guard; until Kevin adds them to `.github/locked-paths.txt`, a human or another tool can still edit them without a CI failure.
+- `src/grant/` is not listed in `self-model.json` (the generator indexes only top-level `src/*.js`).
+- No paid model has ever been run; paid-model reconciliation is untested against a real provider.
+
+### CONTRACT GAPS
+- Run journal cannot hold structured spend (new, journaled at runtime as the 15th `contract-gap`; sidecar used instead, schema not edited).
+- The grant schema defines `max_usd` as a JSON number (float); the meter converts through decimal text, but a decimal string or integer micro-USD field would be safer. Not changed.
+- Self-model generator ignores subdirectories of `src/`.
+- Existing gaps from Spec C (role, risk tiers, scope vocabulary, refusal/truncation, self-model capabilities) are untouched, as specified.
+
+### CHANGED LOCKED PATHS (expected: none)
+- None. `git diff --name-only origin/main...HEAD` lists only `config/prices.json`, `src/builder-adapter.js`, `src/builder-confine.js`, `src/grant/*`, `test/*`, `README.md`, `LOG.md`. (`src/builder-confine.js` is not a locked path today but holds the adapter's lock list; review it with the same care.)
+
+### Files for Kevin to lock by hand after review
+- `src/grant/` (whole directory)
+- `config/prices.json` (or all of `config/`)
+- Consider also `src/builder-confine.js` (it holds `ALWAYS_LOCKED`) and `src/builder-adapter.js` (the chokepoint), and `test/grant-meter.test.js`, `test/grant-adapter.test.js` so the structural test cannot be loosened by the builder.
+- Add them to `.github/locked-paths.txt` and CODEOWNERS (not edited here).
+
+### Not verified (guard on a real PR, live endpoint)
+- The `protect-locked-paths` workflow on a real PR (cannot run here).
+- Any live OpenRouter call, real usage/`cost` response shape, and `builder:smoke` (not run). The `usage.cost` field and `usage: {include: true}` request flag follow OpenRouter's documented usage accounting but were only exercised against the local mock.
+
+### Open questions for Kevin
+- Which paid models, and at what prices, should go in `config/prices.json`? It is empty on purpose.
+- Should the budget be per grant across runs (needs a shared ledger) instead of per run?
+- Should `max_usd` in the grant schema become a decimal string or integer micro-USD?
+- Should a reported provider cost of 0 on a paid model be trusted (current) or treated as suspect and settled at computed cost?
+- Should mid-run clock-backwards and meter-internal errors be exit 4 (current) or 2?
+
+### Run-journal issues raised
+- `grant-exceeded` (risk/high): one per stopped run, with limit name (`budget`, `tool_calls`, `expiry`, `clock`) and numbers.
+- `contract-gap`: 15 per run now (14 existing, plus spend-record sidecar).
+- Existing kinds unchanged: `rate-limit`, `refusal`, `truncation`, `malformed-tool-calls`.
+
 ## 2026-11-23 (Spec C parity test and adapter fold fix)
 - Files touched: src/builder-confine.js, src/builder-adapter.js, test/builder-confine.test.js, test/builder-readdeny.test.js, LOG.md
 - What changed: fixed the red parity test on main (PR #4 merged with `test/builder-confine.test.js` "shared corpus" pinning the old guard's gap with a `deepEqual` on the adapter-only list; with the hardened guard that list is empty, so main failed 1 of 256 tests). The test now asserts parity both ways (`adapterOnly` and `guardOnly` both `[]`) and has four new hostile spellings (long-s CODEOWNERS, `sub/.GitAttributes`, `.git~1/x`, `a/.gitmodules`). `foldSegment` now folds exactly like the guard (`toUpperCase().toLowerCase()` before the final NFC), closing the long s (U+017F) and sharp s gap, with a test that a write to the long-s CODEOWNERS spelling is refused. `list_dir` now accepts the repository root (`.`, `./`, empty) for listing only, via a `confine` option `allowRoot` that is ignored when `write` is set; secrets and git internals stay hidden; test through the mock adapter. One existing list_dir test used a prefix match on `.git` that would now false-match `.github`; changed to an exact-name check.

@@ -8,7 +8,7 @@ import { confine, confineMove, isLockedPath, ConfineError, ALWAYS_LOCKED } from 
 import { isLocked, parseLocked } from '../.github/scripts/locked-paths.mjs';
 import { loadConfig } from '../src/builder-config.js';
 import { runBuilder } from '../src/builder-adapter.js';
-import { startMock, toolCall, reply, tempRepo, makeGrant, FAKE_KEY } from './builder-mock.js';
+import { startMock, toolCall, reply, tempRepo, makeGrant, FAKE_KEY, TEST_PRICES } from './builder-mock.js';
 
 const W = (dir, p, extra = {}) => confine(dir, p, { write: true, allowedPaths: ['.'], ...extra });
 const refused = (dir, p, opts) => assert.throws(() => W(dir, p, opts), ConfineError, p);
@@ -112,7 +112,7 @@ test('adapter end to end: case-variant writes to locked paths and .GIT/config ch
   const mock = await startMock((_r, n) => (n === 1 ? reply({ tool_calls: calls }, 'tool_calls') : reply({ content: 'done' })));
   try {
     const config = loadConfig({ env: { OPENROUTER_API_KEY: FAKE_KEY, AGENT_BUILDER_BASE_URL: mock.url, AGENT_BUILDER_MODEL: 'vendor-a/model-a' }, cwd: tmpdir() });
-    const result = await runBuilder({ config, task: { repo: 'agent-core', goal: 'g', grant: makeGrant({ scope: { repos: ['agent-core'], paths: ['.'] }, budget: { max_usd: 1, max_tool_calls: 50 } }), workdir: dir } });
+    const result = await runBuilder({ config, task: { repo: 'agent-core', goal: 'g', grant: makeGrant({ scope: { repos: ['agent-core'], paths: ['.'] }, budget: { max_usd: 1, max_tool_calls: 50 } }), workdir: dir } }, { priceTable: TEST_PRICES });
     assert.equal(result.status, 'completed');
     assert.equal(result.commit, null);
     assert.equal(readFileSync(join(dir, 'acceptance/a.test.js'), 'utf8'), '// locked\n');
