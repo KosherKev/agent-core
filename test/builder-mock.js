@@ -34,7 +34,7 @@ export const happyScript = (n, file = 'docs/hello.md') => (n === 1
   : reply({ content: 'Done: wrote the file.' }));
 
 /** Temp git repo on a task branch with one commit; returns its path. */
-export function tempRepo(branch = 'task/mock') {
+export function tempRepo(branch = 'task/mock', remote = 'https://github.com/KosherKev/agent-core.git') {
   const d = mkdtempSync(join(tmpdir(), 'brepo-'));
   const g = (...a) => execFileSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@t', '-c', 'commit.gpgsign=false', ...a], { cwd: d, stdio: 'pipe' });
   g('init', '-q', '-b', 'main');
@@ -43,6 +43,7 @@ export function tempRepo(branch = 'task/mock') {
   writeFileSync(join(d, 'acceptance/a.test.js'), '// locked\n');
   writeFileSync(join(d, '.github/locked-paths.txt'), 'acceptance/\n.github/\n');
   g('add', '.'); g('commit', '-q', '-m', 'init');
+  if (remote) g('remote', 'add', 'origin', remote);
   g('checkout', '-q', '-b', branch);
   return d;
 }

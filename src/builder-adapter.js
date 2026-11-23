@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process';
-import { appendFileSync, mkdirSync, readFileSync, writeFileSync, readdirSync, statSync, existsSync } from 'node:fs';
+import { appendFileSync, mkdirSync, readFileSync, writeFileSync, readdirSync, statSync, existsSync, realpathSync } from 'node:fs';
 import { dirname, join, basename } from 'node:path';
 import { randomBytes } from 'node:crypto';
 import { createJournal } from './journal.js';
@@ -37,6 +37,55 @@ const TOOLS = [
   { type: 'function', function: { name: 'write_file', description: 'Create or overwrite a UTF-8 text file.', parameters: { type: 'object', properties: { path: { type: 'string' }, content: { type: 'string' } }, required: ['path', 'content'] } } },
   { type: 'function', function: { name: 'list_dir', description: 'List a directory.', parameters: { type: 'object', properties: { path: { type: 'string' } }, required: ['path'] } } },
 ];
+
+const NAME = '[A-Za-z0-9_.-]+';
+const GH_FORMS = [
+  new RegExp(`^https://github\\.com/(${NAME})/(${NAME})/?$`),
+  new RegExp(`^git@github\\.com:(${NAME})/(${NAME})/?$`),
+  new RegExp(`^ssh://git@github\\.com/(${NAME})/(${NAME})/?$`),
+];
+
+/**
+ * Parse a git remote URL (GitHub https, scp-style ssh and ssh:// forms only) to { owner, repo }, or null.
+ * Anything else (other hosts, embedded credentials, extra path segments, dot segments) is unparseable.
+ */
+export function parseGithubRemote(url) {
+  if (typeof url !== 'string') return null;
+  for (const re of GH_FORMS) {
+    const m = url.trim().match(re);
+    if (!m) continue;
+    const owner = m[1]; const repo = m[2].replace(/\.git$/, '');
+    if (!repo || /^\.+$/.test(repo) || /^\.+$/.test(owner)) return null;
+    return { owner, repo };
+  }
+  return null;
+}
+
+/**
+ * Derive the repos a worktree really points at from its git remotes (every remote, fetch and push URLs),
+ * never from task input. Returns { ok: true, repos: ['owner/repo', ...] } or { ok: false, why }.
+ * No remote, any unparseable remote, a workdir that is not the repo top level, or any git error: not ok.
+ */
+export function remoteRepos(workdir) {
+  try {
+    const top = realpathSync(git(workdir, ['rev-parse', '--show-toplevel']));
+    if (top !== realpathSync(workdir)) return { ok: false, why: 'workdir is not the top level of its git repository' };
+    const names = git(workdir, ['remote']).split('\n').map((n) => n.trim()).filter(Boolean);
+    if (names.length === 0) return { ok: false, why: 'workdir has no git remote' };
+    const repos = new Set();
+    for (const n of names) {
+      const urls = [...git(workdir, ['remote', 'get-url', '--all', n]).split('\n'), ...git(workdir, ['remote', 'get-url', '--push', '--all', n]).split('\n')];
+      for (const u of urls.map((x) => x.trim()).filter(Boolean)) {
+        const r = parseGithubRemote(u);
+        if (!r) return { ok: false, why: `git remote "${n}" is not a recognised GitHub URL` };
+        repos.add(`${r.owner}/${r.repo}`);
+      }
+    }
+    return repos.size ? { ok: true, repos: [...repos] } : { ok: false, why: 'workdir has no git remote' };
+  } catch {
+    return { ok: false, why: 'could not read the workdir git remote' };
+  }
+}
 
 const git = (cwd, args, extra = {}) => execFileSync('git', args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], ...extra }).trim();
 const defaultSleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -108,8 +157,13 @@ export async function runBuilder({ config, task }, opts = {}) {
     if (!config.apiKey) return refuse('OPENROUTER_API_KEY is not set');
     if (!task || typeof task.goal !== 'string' || !task.goal.trim() || typeof task.repo !== 'string' || !task.repo.trim() || !workdir) return refuse('task needs repo, goal, grant and workdir');
     const repoName = basename(task.repo.replace(/\/+$/, ''));
-    if (isFreeModel(config.model) && !config.free_model_repo_allowlist.includes(repoName)) {
-      return refuse(`free model ${config.model} may only run on allowlisted repos; "${repoName}" is not on FREE_MODEL_REPO_ALLOWLIST`);
+    if (isFreeModel(config.model)) {
+      // Free endpoints have no stated data policy: decide from the workdir's real git remotes, never from task.repo.
+      const rr = remoteRepos(workdir);
+      if (!rr.ok) return refuse(`free model ${config.model} refused: ${rr.why}`);
+      const allow = config.free_model_repo_allowlist.map((a) => a.toLowerCase());
+      const bad = rr.repos.filter((r) => !allow.includes(r.toLowerCase()) && !allow.includes(r.split('/')[1].toLowerCase()));
+      if (bad.length) return refuse(`free model ${config.model} may only run on allowlisted repos; git remote repo "${bad[0]}" is not on FREE_MODEL_REPO_ALLOWLIST`);
     }
     const g = validateGrant(task.grant);
     if (!g.valid) return refuse(`grant invalid: ${g.errors.join('; ')}`);

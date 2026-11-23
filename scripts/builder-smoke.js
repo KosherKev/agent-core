@@ -23,6 +23,9 @@ if (!config.apiKey) { console.error('OPENROUTER_API_KEY is not set (environment 
 const dir = mkdtempSync(join(tmpdir(), 'builder-smoke-'));
 const git = (...a) => execFileSync('git', a, { cwd: dir, stdio: 'pipe', encoding: 'utf8' }).trim();
 execFileSync('git', ['clone', '--quiet', '--no-hardlinks', REPO_ROOT, dir], { stdio: 'pipe' });
+// The clone's origin is the local path; a :free model decides from the real git remote, so point origin at
+// this repo's own remote URL (nothing is pushed or fetched).
+try { git('remote', 'set-url', 'origin', execFileSync('git', ['remote', 'get-url', 'origin'], { cwd: REPO_ROOT, stdio: 'pipe', encoding: 'utf8' }).trim()); } catch { /* no remote: a :free model will be refused */ }
 git('checkout', '-q', '-b', `smoke/builder-${Date.now()}`);
 
 const task = {

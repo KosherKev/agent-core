@@ -13,9 +13,9 @@ import { startMock, toolCall, reply, happyScript, tempRepo, makeGrant, FAKE_KEY 
 
 const gitOut = (cwd, ...a) => execFileSync('git', a, { cwd, encoding: 'utf8' });
 
-async function scenario({ model = 'vendor-a/model-a', env = {}, handler, repo = 'agent-core', grant, branch, workdir, opts = {}, goal = 'Write docs/hello.md' }) {
+async function scenario({ model = 'vendor-a/model-a', env = {}, handler, repo = 'agent-core', grant, branch, workdir, remote, opts = {}, goal = 'Write docs/hello.md' }) {
   const mock = await startMock(handler);
-  const dir = workdir ?? tempRepo();
+  const dir = workdir ?? (remote === undefined ? tempRepo() : tempRepo('task/mock', remote));
   const config = loadConfig({ env: { OPENROUTER_API_KEY: FAKE_KEY, AGENT_BUILDER_MODEL: model, AGENT_BUILDER_BASE_URL: mock.url, ...env }, cwd: tmpdir() });
   const sleeps = [];
   try {
@@ -54,7 +54,7 @@ test('provider preferences pass through to the request when set, and are absent 
 });
 
 test('free model against a non-allowlisted repo exits before any network call (zero requests)', async () => {
-  const { result, mock, dir } = await scenario({ model: 'vendor-b/model-b:free', repo: 'some-private-repo', handler: () => reply({ content: 'should never be called' }) });
+  const { result, mock, dir } = await scenario({ model: 'vendor-b/model-b:free', repo: 'some-private-repo', remote: 'https://github.com/KosherKev/some-private-repo.git', grant: makeGrant({ scope: { repos: ['some-private-repo'], paths: ['docs/'] } }), handler: () => reply({ content: 'should never be called' }) });
   assert.equal(mock.requests.length, 0);
   assert.equal(result.status, 'refused');
   assert.equal(result.exit_code, EXIT.REFUSED);
@@ -63,7 +63,7 @@ test('free model against a non-allowlisted repo exits before any network call (z
 });
 
 test('free model on a repo added to the allowlist is allowed; non-free model is not restricted by it', async () => {
-  const a = await scenario({ model: 'x/y:free', repo: 'other', env: { FREE_MODEL_REPO_ALLOWLIST: 'other' }, handler: (_r, n) => happyScript(n) });
+  const a = await scenario({ model: 'x/y:free', repo: 'other', remote: 'git@github.com:KosherKev/other.git', env: { FREE_MODEL_REPO_ALLOWLIST: 'other' }, handler: (_r, n) => happyScript(n) });
   assert.equal(a.result.status, 'completed');
   const b = await scenario({ model: 'x/y', repo: 'other', handler: (_r, n) => happyScript(n) });
   assert.equal(b.result.status, 'completed');
