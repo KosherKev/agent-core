@@ -1,5 +1,44 @@
 # LOG
 
+## 2026-11-23 (Meter cost and expiry fixes)
+
+### What was done
+- Cost rule (commit 2a563c6, `src/grant/meter.js` `settle`): for a paid model the settled cost is the higher of the provider-reported `usage.cost` and the cost computed from `usage` tokens and the price table. A reported 0, negative, non-finite, non-numeric or null cost is never trusted below computed (malformed values are dropped). Missing or unusable usage settles at the full reservation, even if a cost was reported (a reported cost with no token counts cannot be checked against the price table). `:free` models unchanged (valid reported cost, else 0). Spend-record `source` is `provider` when reported >= computed, else `computed`.
+- Strict expiry (commit 7ce6f7a): new `src/grant/expiry.js` `parseExpiry`. Confirmed first: the meter used `Date.parse` directly, which accepts locale strings and reads an offset-less timestamp as host-local time; the adapter preflight also used bare `Date.parse` (only the grant schema's `date-time` format check stood in front of both). Now both call `parseExpiry`: strict pattern `YYYY-MM-DDTHH:MM:SS[.f{1,9}](Z|+hh:mm|-hh:mm)`, upper-case `T`/`Z`, no padding, then explicit calendar range checks (month, days per month incl. leap years, hour 0-23, minute and second 0-59, offset hours 0-23 and minutes 0-59, year 1000-9999) before `Date.parse` on the validated string. Anything else refuses: meter `GrantError('grant')`, adapter preflight exit 2 before any network call. Past expiry at preflight still refuses.
+- Existing tests adjusted for the new rule: two tests settled a reported cost with no token counts (now worst case); they now include token counts.
+- Schema, guard, validators, acceptance, workflows, price table contents untouched.
+
+### Commands run and results (with counts)
+- Baseline f266fc5: 288 tests, 288 pass.
+- After commit 1 (cost): Node 24.22.3 296 tests, 296 pass (8 new).
+- After commit 2 (expiry), final: Node 24.22.3: `npm test` 303 tests, 303 pass, 0 fail, 0 skipped. Node 22.23.5: 303 tests, 303 pass, 0 fail, 0 skipped. 15 new tests in total.
+- `npm run build` clean (self-model unchanged); `npm run check:self-model` passes; `npm audit --omit=dev` found 0 vulnerabilities. No new dependencies.
+- Fail-before proof: the new `test/grant-meter.test.js` and `test/grant-adapter.test.js` run against an unmodified f266fc5 source copy (scratch dir, since removed): 6 failed, including "cost: a reported cost of 0 on a paid model settles at the computed cost", "cost: missing usage still settles at the worst-case reservation even with a reported cost", and the expiry tests for no offset, date-only, locale string and calendar-invalid date. They pass on this branch. The padded-string and preflight zero-request tests pass on f266fc5 too, because the grant schema check already refused those; the new tests lock that in at the meter and adapter level.
+
+### Decisions and why
+- SUPERSEDED: the earlier decision "Provider-reported cost is trusted over computed cost (the stated order of trust), including a reported 0" is replaced by: higher of reported and computed wins; a reported cost is never trusted below computed (Kevin's decision, 2026-11-23).
+- A numeric-looking string reported cost (for example "0.003") is still parsed; if higher than computed it is honoured, otherwise computed wins. Non-numeric strings are dropped.
+- Restrictive choices on expiry: leap second (:60) refused, lower-case `t`/`z` refused, years before 1000 refused, fractions beyond milliseconds truncated by `Date.parse` (rounds the expiry down, which is the safe direction).
+- `parseExpiry` is exported from `src/grant/index.js` and used by the adapter so there is a single parser.
+
+### What is NOT enforced after this task
+- Spend is only as good as the price table and provider data; no reconciliation against the provider's account.
+- Per-run budget only: meter state is in memory per run, the budget is per run, not per grant across runs. Two runs on the same grant each get the full budget. There is no shared ledger (a later spec).
+- Only `budget.max_usd`, `budget.max_tool_calls` and `expires_at` are metered; `scope` and risk tiers are not.
+- A provider that reports a cost lower than the truth AND omits token counts is settled at worst case; one that reports plausible token counts but lies about them is only as safe as those counts.
+- The meter cannot stop a request already in flight; the host clock is trusted (only a backwards jump over 1 s is caught).
+- The guard workflow on a real PR is unverified here.
+
+### CHANGED LOCKED PATHS (expected: none)
+- None. `git diff --name-only origin/main...HEAD` lists only LOG.md, README.md, config/prices.json, src/builder-adapter.js, src/builder-confine.js, src/grant/*, test/*; nothing under `acceptance/`, `.github/`, `schemas/`, nor `CODEOWNERS` or `src/validators.js`. (Local `main` is stale; origin/main is used as the base. This round touched `src/grant/` as the spec allows, plus `src/builder-adapter.js` for the preflight parse, and the two grant test files.)
+
+### Not verified
+- The CI guard on a real PR; any paid model against a real provider; `builder:smoke` (out of scope).
+
+### Open questions for Kevin
+- `src/builder-adapter.js` also changed (preflight now calls `parseExpiry`). It is not a locked path; consider locking it with `src/grant/`.
+- Should a reported cost with no token counts on a paid model ever be honoured when it is above zero but below the reservation? Settled at the worst case for now (more restrictive).
+
 ## 2026-11-23 (Grant metering and expiry)
 
 ### What was done
@@ -27,7 +66,7 @@
 - Budget `max_usd` is rounded DOWN to micro-USD; every cost is rounded UP.
 - Network error or timeout settles at the worst-case reservation (the request may have been billed). HTTP error responses release at zero (the provider rejected the request). Each 429 retry reserves and releases again.
 - If the spend record cannot be written, the run refuses (mid-run: the meter refuses); no unaudited spend.
-- Provider-reported cost is trusted over computed cost (the stated order of trust), including a reported 0.
+- (SUPERSEDED 2026-11-23, see the cost and expiry fixes section above: the higher of reported and computed cost now wins; a reported cost is never trusted below computed.) Provider-reported cost is trusted over computed cost (the stated order of trust), including a reported 0.
 - Every mid-run meter refusal (including clock backwards, internal error) uses exit 4, not 2; preflight refusals use exit 2.
 - Default `max_tokens` per call is 8192 (`DEFAULT_MAX_OUTPUT_TOKENS`); this now also applies to `:free` models, which previously sent no `max_tokens`.
 - Locked the whole of `config/` and `fixtures/grant/` for builder writes, broader than the two files named in the spec.
