@@ -2,7 +2,7 @@ import { usdToMicro, callCost } from './money.js';
 import { priceFor, parsePriceTable } from './prices.js';
 import { parseExpiry } from './expiry.js';
 
-/** Why a meter refused. `limit` is one of: budget, tool_calls, expiry, clock, grant, price, internal. */
+/** Why a meter refused. `limit` is one of: budget, tool_calls, expiry, clock, ledger, grant, price, internal. */
 export class GrantError extends Error {
   constructor(limit, message, numbers = {}) {
     super(message);
@@ -13,7 +13,7 @@ export class GrantError extends Error {
 }
 
 /** Limits that mean "the grant ran out" (exit code grant-exceeded). The others are refusals of an unusable grant/price/clock. */
-export const EXCEEDED_LIMITS = Object.freeze(['budget', 'tool_calls', 'expiry', 'clock']);
+export const EXCEEDED_LIMITS = Object.freeze(['budget', 'tool_calls', 'expiry', 'clock', 'ledger']);
 
 export const CLOCK_TOLERANCE_MS = 1000;
 export const DEFAULT_MAX_OUTPUT_TOKENS = 8192;
@@ -44,10 +44,12 @@ function estimateInputTokens(input) {
  *  - priceTable: result of parsePriceTable (tracked config/prices.json). Unknown paid model => createMeter throws.
  *  - model: the model id this run will use; priced up front so an unpriced model is refused before any network call.
  *  - sink: optional (record) => void for the append-only spend record. If it throws, the meter refuses (fail closed).
+ *  - ledger + runId: optional shared per-grant ledger (src/ledger/). With it, every reserve/settle/release/tool call goes through the
+ *    ledger and the stricter of ledger and in-memory accounting wins; any ledger failure refuses (limit "ledger").
  *
  * Every public method fails closed: any internal error becomes a GrantError and means "refuse".
  */
-export function createMeter(grant, { now = Date.now, priceTable, model, sink } = {}) {
+export function createMeter(grant, { now = Date.now, priceTable, model, sink, ledger, runId } = {}) {
   const guard = (fn) => (...args) => {
     try { return fn(...args); } catch (err) {
       if (err instanceof GrantError) throw err;
@@ -72,6 +74,21 @@ export function createMeter(grant, { now = Date.now, priceTable, model, sink } =
     if (table && !table.models?.get) table = parsePriceTable(table); // accept a plain parsed object too
     const price = priceFor(table, model);
     if (model !== undefined && price === null) throw new GrantError('price', `no trusted price for model "${String(model).slice(0, 80)}" and the grant has a nonzero budget; refusing`);
+
+    // Shared ledger (per grant, across runs). Opening the run here is the preflight check: a bad ledger, a mutated grant or an
+    // already exhausted grant throws before any network call.
+    const viaLedger = (fn) => {
+      try { return fn(); } catch (err) {
+        if (err instanceof GrantError) throw err;
+        if (err?.name === 'LedgerError') throw new GrantError(err.kind === 'budget' ? 'budget' : err.kind === 'tool_calls' ? 'tool_calls' : 'ledger', err.message);
+        throw new GrantError('ledger', 'ledger failure; refusing (fail closed)');
+      }
+    };
+    let run = null; let ended = false;
+    if (ledger !== undefined) {
+      if (!ledger || typeof ledger.openRun !== 'function') throw new GrantError('ledger', 'no usable grant ledger: refusing');
+      run = viaLedger(() => ledger.openRun(g, runId));
+    }
 
     const state = { settled: 0, toolCalls: 0, seq: 0, lastNow: null, open: new Map() };
     const reservedTotal = () => { let t = 0; for (const r of state.open.values()) t += r.reserved; return t; };
@@ -101,6 +118,7 @@ export function createMeter(grant, { now = Date.now, priceTable, model, sink } =
       checkTool: guard(() => {
         checkExpiry();
         if (state.toolCalls >= maxCalls) throw new GrantError('tool_calls', 'grant tool-call limit reached', { used: state.toolCalls, max: maxCalls });
+        if (run) viaLedger(() => run.reserveTool());
         state.toolCalls += 1;
         return state.toolCalls;
       }),
@@ -117,7 +135,7 @@ export function createMeter(grant, { now = Date.now, priceTable, model, sink } =
         const wanted = call.max_tokens === undefined ? DEFAULT_MAX_OUTPUT_TOKENS : call.max_tokens;
         if (!Number.isSafeInteger(wanted) || wanted < 1) throw new GrantError('grant', 'call max_tokens must be a positive integer');
         const inTokens = estimateInputTokens(call.input);
-        const left = remaining();
+        const left = run ? Math.min(remaining(), viaLedger(() => run.remaining().remaining_micro)) : remaining();
         let maxTokens = wanted;
         if (callCost(inTokens, wanted, p) > left) {
           // Largest output that still fits: binary search over exact integer costs (no float division).
@@ -128,7 +146,8 @@ export function createMeter(grant, { now = Date.now, priceTable, model, sink } =
         }
         const reserved = callCost(inTokens, maxTokens, p);
         const id = `r${++state.seq}`;
-        state.open.set(id, { reserved, inTokens, maxTokens, price: p });
+        const lid = run ? viaLedger(() => run.reserve({ micro: reserved })) : null;
+        state.open.set(id, { reserved, inTokens, maxTokens, price: p, lid });
         record({ event: 'reserve', call_id: id, model: call.model ?? model ?? null, input_tokens_est: inTokens, max_tokens: maxTokens, clamped: maxTokens !== wanted, reserved_micro: reserved });
         return Object.freeze({ id, max_tokens: maxTokens, reserved_micro: reserved });
       }),
@@ -153,6 +172,7 @@ export function createMeter(grant, { now = Date.now, priceTable, model, sink } =
           // A reported cost is never trusted below the computed cost; higher wins. Malformed reported costs were dropped above.
           if (provider !== null && provider >= computed) { cost = provider; source = 'provider'; } else { cost = computed; source = 'computed'; }
         } else { cost = open.reserved; source = 'worst_case'; }
+        if (run) viaLedger(() => run.settle(open.lid, cost)); // ledger first: if it fails the reservation stays open (conservative)
         state.open.delete(reservation.id);
         state.settled += cost;
         record({ event: 'settle', call_id: reservation.id, source, cost_micro: cost, reserved_micro: open.reserved });
@@ -163,10 +183,14 @@ export function createMeter(grant, { now = Date.now, priceTable, model, sink } =
       release: guard((reservation, reason) => {
         const open = state.open.get(reservation?.id);
         if (!open) throw new GrantError('internal', 'release without an open reservation');
+        if (run) viaLedger(() => run.release(open.lid));
         state.open.delete(reservation.id);
         record({ event: 'release', call_id: reservation.id, source: 'rejected', cost_micro: 0, reserved_micro: open.reserved, reason: String(reason ?? '').slice(0, 60) });
         return 0;
       }),
+
+      /** Write the ledger's run_end for this run. Idempotent; a run that never reaches it keeps its open reservations counted. */
+      end: guard((status) => { if (!run || ended) return; viaLedger(() => run.endRun(status)); ended = true; }),
 
       /** Read-only snapshot (integers). */
       snapshot: () => Object.freeze({ budget_micro: budgetMicro, settled_micro: state.settled, reserved_micro: reservedTotal(), remaining_micro: remaining(), tool_calls: state.toolCalls, max_tool_calls: maxCalls, expires_at_ms: expiresAt }),

@@ -1,5 +1,66 @@
 # LOG
 
+## 2026-11-23 (Per grant spend ledger)
+### What was done
+- New `src/ledger/` (format.js, lock.js, ledger.js, report.js, index.js). Local append-only JSON-lines ledger, one file per grant, in `AGENT_LEDGER_DIR` (default `~/.agent-ledger`, refused if inside this repo, dir 0700, files 0600, a looser pre-existing dir is refused). Money is integer micro-USD. Entries: `open`, `reserve`, `settle`, `release`, `run_end`. Remaining = limit - settled - open reservations; a run with no `run_end` keeps its reservations counted. `max_tool_calls` is counted across runs (tool calls are `reserve` entries of kind `tool`).
+- Grant key = the grant's existing `task_id` (schema v1 has it, so no "no identity" gap); the file name is a SHA-256 of the key. Fingerprint = SHA-256 of canonical (sorted-key) grant JSON, stored on first use; a later run with the same key and a different fingerprint refuses.
+- Integrity: each line carries the SHA-256 of the previous line (hash chain), plus a sequence number. Read verifies chain, sequence, entry shape and reservation state; a broken chain, unparseable or torn line, or unknown entry type refuses. The writer validates what it appends so it can never poison its own file.
+- Atomic reserve: read, check and append happen under a per-grant exclusive lock directory (built with its owner file in a temp dir, then renamed into place, so the lock never exists without an owner; released by rename-then-delete). Bounded wait; timeout or any lock error refuses. A stale lock is broken only if the owner pid is dead AND the lock is older than 30 s; a live pid's lock is never broken.
+- `npm run ledger:report` (`src/ledger/report.js`, read-only, accepts `--dir`): per grant limit, settled, open reservations, remaining, tool calls, and runs without `run_end`; exit 1 with a clear ERROR on any chain failure.
+- Meter (`src/grant/meter.js`): `createMeter(grant, { ledger, runId })` opens the run at creation (preflight), and routes reserve, settle, release and each tool call through the ledger; the reservation is clamped to the stricter of the in-memory and ledger remaining; `meter.end(status)` writes `run_end`. Ledger failures become `GrantError('ledger')` (added to `EXCEEDED_LIMITS`). An exhausted grant refuses at preflight.
+- Adapter (`src/builder-adapter.js`): opens the default ledger (or `opts.ledger`; `null` or a non-ledger refuses), passes it to the meter, calls `meter.end` in `finish`, and passes the ledger dir to every tool as a protected directory. Preflight refusal = exit 2, mid-run failure = exit 4 with a `grant-exceeded` issue naming `ledger`.
+- Confine (`src/builder-confine.js`): `src/ledger/` and `.agent-ledger/` added to `ALWAYS_LOCKED`; the read denylist refuses a `.agent-ledger` segment; new `protectedDirs` option refuses read and write of any absolute directory (ledger dir) in any case spelling, via symlink or realpath.
+- Test helper `test/builder-mock.js` (not locked): points `AGENT_LEDGER_DIR` at a fresh temp dir at import and gives each `makeGrant()` a unique `task_id`, so existing tests never touch `~/.agent-ledger` and do not share a budget through the ledger.
+
+### Commands run and results (with counts)
+- Baseline origin/main 8055c29, `npm test`: Node 22.23.5 303 tests, 303 pass; Node 24.22.3 303 tests, 303 pass.
+- Final: Node 24.22.3 and Node 22.23.5 both 340 tests (303 + 37 new: 19 in ledger.test.js, 3 report, 10 integration, 5 confine), 0 fail, 0 skipped. See the final report for the exact last run.
+- `npm run build` clean, `npm run check:self-model` passes, `npm audit --omit=dev` 0 vulnerabilities. No new dependencies (node crypto and fs only).
+- Lock removed (scratch copy under /private/tmp with the lock replaced by a no-op): "two concurrent meters ... can never overspend" FAILED 3 of 3 runs; "a lock timeout refuses" and "a stale lock ..." also fail. With the lock it passed in repeated runs, including 12 simultaneous copies.
+- Debugging notes: a first release-by-delete could remove a successor's lock (found by a flaky full-suite run); fixed by releasing via rename. A later flake was a test flaw (a slow worker legitimately refused at open once the budget was gone).
+
+### Decisions and why
+- Restrictive: any ledger problem refuses; a pre-existing ledger dir with mode other than 0700 is refused rather than chmod-ed; a settle may exceed its reservation (provider cost) and then remaining goes negative, which blocks further spend.
+- A mutated grant includes any change, even `expires_at` or scope; a new budget needs a new `task_id`. A run id cannot be reused on a grant.
+- `createMeter` without a ledger still works in memory only (library use and the older meter tests); the adapter never runs without one.
+- Lock built by mkdir plus rename rather than a bare mkdir so a crash cannot leave an ownerless lock.
+
+### What is NOT enforced after this task
+- Anyone with filesystem access as Kevin's user can delete or rewrite the whole ledger (a fresh consistent chain is accepted); a gateway-held ledger (M1) is the real answer. This does not close that.
+- Tail truncation (whole lines cut off the end) cannot be detected without an external anchor; deleting the file or its last lines silently frees budget. Only an edit or removal before the last line breaks the chain.
+- Single machine, single filesystem only; no provider billing reconciliation; spend is only as good as the price table and provider data.
+- The `task_id` is trusted as the grant identity: the schema does not say it is unique per grant, so two different grants reusing one `task_id` collide (the second refuses as mutated).
+- A crash between lock-directory creation and use is recovered only after the stale age, and only when the pid is dead; a tiny window remains where two simultaneous stale-lock breakers could contend (they refuse rather than proceed).
+- The previously listed per-run-only gap from "Grant metering and expiry" is closed for runs that go through the adapter with the ledger; it remains for any other consumer of `createMeter` that passes no ledger.
+
+### CONTRACT GAPS
+- `schemas/v1/grant.schema.json`: `task_id` is the only identity field and is not documented as the unique grant key; the ledger uses it as such (no schema change made).
+- The contract has no notion of a grant spanning runs, a run id, or a spend ledger; the ledger, `run_end` statuses and entry types are adapter-local.
+
+### CHANGED LOCKED PATHS (file, one-line reason)
+- `src/grant/meter.js`: meter takes a ledger and routes reserve, settle, release, tool calls and run end through it; adds the `ledger` limit.
+- `src/builder-adapter.js`: opens and requires the ledger at preflight, writes run_end, passes the ledger dir as protected to the tools.
+- `src/builder-confine.js`: locks `src/ledger/` and `.agent-ledger/`, denies reading `.agent-ledger`, adds `protectedDirs`.
+- (`test/grant-meter.test.js` and `test/grant-adapter.test.js` were NOT changed; the new tests are in new files.)
+- Not locked but touched: `package.json` (`ledger:report` script), `test/builder-mock.js` (temp ledger dir, unique task ids).
+
+### Files for Kevin to lock by hand after review
+- `src/ledger/` (add to `.github/locked-paths.txt` and the guard/CODEOWNERS lists), and the new tests `test/ledger.test.js`, `test/ledger-report.test.js`, `test/ledger-integration.test.js`, `test/ledger-confine.test.js`, `test/ledger-worker.js`. Not edited here (out of the exception).
+
+### Not verified
+- The `protect-locked-paths` guard workflow on a real PR (not runnable here); expected to fail by design.
+- Behaviour on a non-macOS or network filesystem (rename atomicity, fsync, pid liveness); only APFS on macOS tested.
+- No live network, real key, `builder:smoke` or paid model was used; the real `~/.agent-ledger` was never created.
+
+### Open questions for Kevin
+- Should an existing ledger dir with mode 0755 be accepted (chmod by the tool) instead of refused? Refused for now.
+- Should a mutated grant under the same `task_id` ever be allowed (for example an expiry extension)? Refused for now.
+- Should the stale-lock age (30 s) and lock wait (5 s) be configurable by env? Fixed defaults for now.
+- Where should an external anchor for the chain tip live (gateway or a second location)?
+
+### Run-journal issues raised
+- Per run the adapter journals the existing issues; a ledger stop adds a `[kind: grant-exceeded]` issue naming limit "ledger". If `run_end` cannot be written an `attempt` entry 'ledger run_end' is journaled as failed. No entries were produced against a real endpoint.
+
 ## 2026-11-23 (Meter cost and expiry fixes)
 
 ### What was done

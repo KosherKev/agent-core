@@ -13,6 +13,11 @@ export const TEST_PRICES = parsePriceTable({ schema_version: '1', models: {
   'x/y': { input_micro_per_mtok: 10000, output_micro_per_mtok: 20000 },
 } });
 
+// The adapter needs a grant ledger. Tests never touch the real ~/.agent-ledger: point the default at a fresh temp directory,
+// and give every makeGrant() its own task_id (the ledger key) so tests do not share a budget through it.
+process.env.AGENT_LEDGER_DIR = join(mkdtempSync(join(tmpdir(), 'agent-ledger-test-')), 'ledger');
+let grantSeq = 0;
+
 export const FAKE_KEY = 'sk-or-v1-FAKEKEY-for-tests-only-0123456789';
 
 /** Local OpenAI-compatible mock on 127.0.0.1 with an ephemeral port. `handler(req, n)` returns {status, headers, body}. */
@@ -58,7 +63,7 @@ export function tempRepo(branch = 'task/mock', remote = 'https://github.com/Kosh
 }
 
 export const makeGrant = (over = {}) => ({
-  schema_version: '1', task_id: 't-1',
+  schema_version: '1', task_id: `t-${process.pid}-${++grantSeq}`,
   scope: { repos: ['agent-core'], paths: ['docs/'] },
   budget: { max_usd: 1, max_tool_calls: 10 },
   expires_at: '2099-01-01T00:00:00Z', allowed_risk_tiers: ['low'], ...over,

@@ -8,7 +8,9 @@ import { resolve, sep, dirname, isAbsolute, relative } from 'node:path';
  */
 export const ALWAYS_LOCKED = ['acceptance/', '.github/', 'CODEOWNERS', 'src/validators.js', '.git/', '.agent-runs/', '.agent-builder.local.json',
   // Grant rules layer (R3/R4): the meter, the tracked price table (config/), grant files and grant fixtures. The agent must not edit the limits that bind it.
-  'src/grant/', 'config/', 'grant.json', 'grants/', 'fixtures/grant/'];
+  'src/grant/', 'config/', 'grant.json', 'grants/', 'fixtures/grant/',
+  // Per-grant spend ledger: the code, and the directory name in case a ledger is ever placed inside a worktree. The real ledger lives outside the repo (see protectedDirs).
+  'src/ledger/', '.agent-ledger/'];
 
 export class ConfineError extends Error {
   constructor(message, blocked = false) { super(message); this.name = 'ConfineError'; this.blocked = blocked; }
@@ -74,7 +76,7 @@ const DENY_EXACT = new Set(['.netrc', '.npmrc', '.pypirc', '.pgpass', '.git-cred
 
 /** Does a (folded) segment name something that must never be read? */
 function deniedSegment(f) {
-  return f.startsWith('.env') || f === '.ssh' || f === '.aws' || f === '.gnupg' || f === '.kube' || f === '.docker' || f === '.agent-runs'
+  return f.startsWith('.env') || f === '.ssh' || f === '.aws' || f === '.gnupg' || f === '.kube' || f === '.docker' || f === '.agent-runs' || f === '.agent-ledger'
     || DENY_EXACT.has(f) || DENY_EXT.test(f) || f.startsWith('id_') || DENY_NAME.test(f);
 }
 
@@ -93,16 +95,16 @@ export function isReadDenied(rel) {
  *    the grant's allowed prefixes; the target itself must not be a symlink;
  *  - `allowRoot` (listing only, never with `write`) lets `.`, `./` or an empty path name the worktree root itself.
  */
-export function confine(root, userPath, { write = false, allowedPaths = ['.'], allowRoot = false } = {}) {
+export function confine(root, userPath, { write = false, allowedPaths = ['.'], allowRoot = false, protectedDirs = [] } = {}) {
   try {
-    return confineInner(root, userPath, { write, allowedPaths, allowRoot });
+    return confineInner(root, userPath, { write, allowedPaths, allowRoot, protectedDirs });
   } catch (err) {
     if (err instanceof ConfineError) throw err;
     throw new ConfineError('path check failed; refusing (fail closed)', true);
   }
 }
 
-function confineInner(root, userPath, { write, allowedPaths, allowRoot }) {
+function confineInner(root, userPath, { write, allowedPaths, allowRoot, protectedDirs = [] }) {
   if (typeof userPath !== 'string' || (!userPath && !(allowRoot && !write))) throw new ConfineError('path must be a non-empty string');
   if (userPath.includes('\0') || userPath.includes('\\')) throw new ConfineError('path contains forbidden characters');
   if (isAbsolute(userPath) || /^[A-Za-z]:/.test(userPath)) throw new ConfineError('absolute paths are not allowed');
@@ -120,6 +122,13 @@ function confineInner(root, userPath, { write, allowedPaths, allowRoot }) {
   while (!existsSync(probe) && !isLink(probe)) probe = dirname(probe);
   let realProbe;
   try { realProbe = realpathSync.native(probe); } catch { throw new ConfineError('unresolvable path or dangling symlink'); }
+  // protectedDirs (absolute, e.g. the grant ledger directory): never readable or writable, however it is spelled or linked.
+  const absSegs = (p) => p.split(sep).filter(Boolean).map((x) => stripTrail(foldSegment(x)));
+  const realAbs = resolve(realProbe, relative(probe, abs));
+  for (const d of protectedDirs) {
+    const ds = absSegs(d);
+    if (ds.length && [abs, realAbs].some((p) => { const ps = absSegs(p); return ds.length <= ps.length && ds.every((x, i) => x === ps[i]); })) throw new ConfineError(`path "${rel}" is inside the grant ledger directory`, true);
+  }
   if (realProbe !== realRoot && !realProbe.startsWith(realRoot + sep)) throw new ConfineError('path escapes the worktree (symlink)');
   if (isLink(abs)) {
     const real = existsSync(abs) ? realpathSync.native(abs) : null;

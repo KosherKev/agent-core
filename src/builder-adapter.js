@@ -8,6 +8,7 @@ import { isFreeModel, checkBaseUrl } from './builder-config.js';
 import { makeRedactor, redactError } from './builder-redact.js';
 import { confine, ConfineError, isReadDenied } from './builder-confine.js';
 import { BUILDER_CAPABILITIES, validateCapabilities } from './builder-capabilities.js';
+import { openLedger } from './ledger/index.js';
 import { createMeter, createSpendSink, GrantError, isMeter, loadPriceTable, parseExpiry, DEFAULT_MAX_OUTPUT_TOKENS } from './grant/index.js';
 
 /** Documented exit codes. */
@@ -144,6 +145,7 @@ export async function runBuilder({ config, task }, opts = {}) {
   const issue = (kind, category, severity, description, suggested_fix) => rec({ kind: 'issue', category, severity, description: `[kind: ${kind}] ${description}`, suggested_fix });
   const finish = (status, exit_code) => {
     result.status = status; result.exit_code = exit_code;
+    if (meter) { try { meter.end(status); } catch (err) { try { attempt('ledger run_end', 'failed', `could not write run_end (reservations stay counted): ${redactError(err, redact).message.slice(0, 200)}`); } catch { /* journal broken */ } } }
     result.entries = journal.read({ run_id: runId });
     result.summary = summarizeJournal(result.entries);
     return result;
@@ -186,9 +188,13 @@ export async function runBuilder({ config, task }, opts = {}) {
     if (!task.grant.scope.repos.includes(repoName) && !task.grant.scope.repos.includes(task.repo)) return refuse(`repo "${repoName}" is not in the grant's scope`);
     // Grant meter (R3): built before any network call. A grant the meter cannot use, or a paid model with no trusted price, refuses here.
     const prices = opts.priceTable ?? loadPriceTable().table;
+    // Shared per-grant ledger (outside the repo): a missing or unreadable ledger refuses here, before any network call.
+    let ledger = opts.ledger;
+    if (ledger === undefined) { try { ledger = openLedger(); } catch (err) { return refuse(`grant ledger unavailable: ${err?.message ?? 'error'}; refusing`); } }
+    if (!ledger || typeof ledger.openRun !== 'function' || typeof ledger.dir !== 'string') return refuse('no grant ledger: refusing (fail closed)');
     try {
       if (!runDir) return refuse('cannot create the run directory for the append-only spend record; refusing (fail closed)');
-      meter = createMeter(task.grant, { now: opts.now ?? Date.now, priceTable: prices, model: config.model, sink: createSpendSink(join(runDir, `${runId}.spend.jsonl`), redact) });
+      meter = createMeter(task.grant, { now: opts.now ?? Date.now, priceTable: prices, model: config.model, ledger, runId, sink: createSpendSink(join(runDir, `${runId}.spend.jsonl`), redact) });
       result.spend_path = join(runDir, `${runId}.spend.jsonl`);
       attempt('spend record', 'ok', `every reserve and settle is appended to .agent-runs/${runId}.spend.jsonl (sidecar; the journal schema cannot hold spend)`);
     } catch (err) {
@@ -216,7 +222,7 @@ export async function runBuilder({ config, task }, opts = {}) {
     const messages = [{ role: 'system', content: SYSTEM_PROMPT }, { role: 'user', content: task.goal }];
     const allowed = task.grant.scope.paths;
 
-    const toolCtx = { workdir, allowed, written };
+    const toolCtx = { workdir, allowed, written, protectedDirs: [ledger.dir] };
 
     /** Journal which limit stopped the run, with the numbers. Used for every grant-exceeded stop. */
     const recordGrantStop = (err) => {
@@ -319,11 +325,11 @@ export async function runBuilder({ config, task }, opts = {}) {
  * The single tool-dispatch chokepoint. Every tool (read_file, write_file, list_dir) runs only through here, and only after the
  * meter has checked expiry and counted the call against max_tool_calls. Without a real meter it throws before touching anything.
  */
-export function dispatchTool(meter, { workdir, allowed, written }, name, args) {
+export function dispatchTool(meter, { workdir, allowed, written, protectedDirs = [] }, name, args) {
   if (!isMeter(meter)) throw new GrantError('grant', 'no grant meter: refusing to run a tool');
   meter.checkTool();
   if (name === 'read_file') {
-    const { abs } = confine(workdir, args.path);
+    const { abs } = confine(workdir, args.path, { protectedDirs });
     // Open first, check it is a regular file, then read at most MAX_READ_BYTES (no whole-file read, no FIFO hang).
     const fd = openSync(abs, 'r');
     try {
@@ -334,11 +340,11 @@ export function dispatchTool(meter, { workdir, allowed, written }, name, args) {
     } finally { closeSync(fd); }
   }
   if (name === 'list_dir') {
-    const { abs } = confine(workdir, args.path, { allowRoot: true });
+    const { abs } = confine(workdir, args.path, { allowRoot: true, protectedDirs });
     return readdirSync(abs).filter((n) => n !== '.agent-runs' && !isReadDenied(n)).sort().map((n) => (statSync(join(abs, n)).isDirectory() ? `${n}/` : n)).join('\n');
   }
   if (name !== 'write_file') throw new ConfineError('unknown tool', true);
-  const { abs, rel } = confine(workdir, args.path, { write: true, allowedPaths: allowed });
+  const { abs, rel } = confine(workdir, args.path, { write: true, allowedPaths: allowed, protectedDirs });
   if (Buffer.byteLength(args.content) > LIMITS.MAX_FILE_BYTES) throw new ConfineError('file too large');
   mkdirSync(dirname(abs), { recursive: true });
   writeFileSync(abs, args.content);
