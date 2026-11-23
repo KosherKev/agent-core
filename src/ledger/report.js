@@ -1,6 +1,7 @@
 #!/usr/bin/env node
-import { existsSync } from 'node:fs';
+import { existsSync, realpathSync } from 'node:fs';
 import { resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { defaultLedgerDir, scanLedgerDir } from './ledger.js';
 import { microToUsd } from '../grant/money.js';
 
@@ -26,10 +27,25 @@ export function buildReport(dir) {
   return { lines, failed };
 }
 
-if (import.meta.url === `file://${resolve(process.argv[1] ?? '')}`) {
-  const i = process.argv.indexOf('--dir');
-  const dir = i > 0 && process.argv[i + 1] ? resolve(process.argv[i + 1]) : defaultLedgerDir();
-  const { lines, failed } = buildReport(dir);
-  console.log(lines.join('\n'));
-  if (failed) { console.error('\nledger:report: one or more ledgers failed verification'); process.exit(1); }
+/**
+ * Is this module the process entry point? Compares real paths (decoded from the file URL, symlinks resolved), so a path with a
+ * space or a symlinked invocation still matches. Fails closed: if the comparison itself throws, report that we ARE the entry
+ * point so the CLI runs (a report that goes silent on a broken ledger is the worse failure). No argv[1] means we were imported.
+ */
+export function isCliEntry(argv1 = process.argv[1], moduleUrl = import.meta.url) {
+  if (!argv1) return false;
+  try { return realpathSync(resolve(argv1)) === realpathSync(fileURLToPath(moduleUrl)); } catch { return true; }
+}
+
+if (isCliEntry()) {
+  try {
+    const i = process.argv.indexOf('--dir');
+    const dir = i > 0 && process.argv[i + 1] ? resolve(process.argv[i + 1]) : defaultLedgerDir();
+    const { lines, failed } = buildReport(dir);
+    console.log(lines.join('\n'));
+    if (failed) { console.error('\nledger:report: one or more ledgers failed verification'); process.exit(1); }
+  } catch (err) {
+    console.error(`ledger:report: ERROR ${err?.message ?? 'unexpected failure'}; this ledger cannot be trusted until fixed by hand`);
+    process.exit(1);
+  }
 }

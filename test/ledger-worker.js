@@ -1,9 +1,12 @@
 // Child process for the concurrency test: reserve fixed-size amounts on one grant until refused, settling each in full.
+import { writeSync, fsyncSync } from 'node:fs';
 import { openLedger } from '../src/ledger/index.js';
 
 const [dir, grantJson, runId, micro, attempts, delayMs] = process.argv.slice(2);
 const sleep = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
-const ledger = openLedger(dir, { lockTimeoutMs: 20000, testHooks: { betweenCheckAndAppend: () => sleep(Number(delayMs)) } });
+// Widen the window between the in-lock check and the append by sleeping inside the injected write (replaces the old production test hook).
+const io = { fsyncSync, writeSync: (...a) => { sleep(Number(delayMs)); return writeSync(...a); } };
+const ledger = openLedger(dir, { lockTimeoutMs: 20000, io });
 let ok = 0; let refused = 0; let errors = 0;
 try {
   const run = ledger.openRun(JSON.parse(grantJson), runId);

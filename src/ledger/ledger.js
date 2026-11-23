@@ -1,10 +1,11 @@
-import { openSync, writeSync, fsyncSync, closeSync, readFileSync, existsSync, lstatSync, mkdirSync, realpathSync, readdirSync, constants as fsc } from 'node:fs';
+import { openSync, closeSync, readFileSync, existsSync, lstatSync, mkdirSync, realpathSync, readdirSync, constants as fsc } from 'node:fs';
 import { homedir } from 'node:os';
 import { join, resolve, dirname, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { usdToMicro } from '../grant/money.js';
-import { LedgerError, GENESIS, canonicalJson, sha256, fileNameFor, replay, summarize } from './format.js';
+import { LedgerError, canonicalJson, sha256, fileNameFor, replay, summarize } from './format.js';
 import { acquireLock } from './lock.js';
+import { writeAll, fsyncDir, realIo } from './durable.js';
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const fail = (msg, kind = 'ledger') => { throw new LedgerError(kind, msg); };
@@ -37,17 +38,22 @@ function ensureDir(dir) {
   if ((st.mode & 0o077) !== 0) fail('ledger directory must be mode 0700 (chmod 700 it by hand); refusing');
 }
 
-/** Sync append of one line, file mode 0600, fsynced. */
-function appendLine(file, line) {
+/**
+ * Sync append of one line, file mode 0600. Every byte must be written (short writes are retried, no progress refuses), the file is
+ * fsynced, and when this call created the file its directory entry is fsynced too, so a power cut cannot silently un-create a ledger.
+ */
+function appendLine(file, line, io) {
+  const isNew = !existsSync(file);
   const fd = openSync(file, fsc.O_WRONLY | fsc.O_APPEND | fsc.O_CREAT, 0o600);
-  try { writeSync(fd, line + '\n'); fsyncSync(fd); } finally { closeSync(fd); }
+  try { writeAll(fd, line + '\n', io); io.fsyncSync(fd); } finally { closeSync(fd); }
+  if (isNew) fsyncDir(dirname(file), io);
 }
 
 const RUN_ID = /^[A-Za-z0-9._:-]{1,100}$/;
 
 /**
  * Open (creating if needed) the local append-only grant ledger.
- * opts: { now, lockTimeoutMs, lockStaleMs, lockPollMs, pidAlive, testHooks: { betweenCheckAndAppend() } }.
+ * opts: { now, lockTimeoutMs, lockMaxAgeMs, lockPollMs, pidAlive, io: { writeSync, fsyncSync } (injectable file operations) }.
  * Every operation that writes holds an exclusive per-grant lock across read, check and append, and re-verifies the hash chain first.
  */
 export function openLedger(dir = defaultLedgerDir(), opts = {}) {
@@ -62,7 +68,7 @@ export function openLedger(dir = defaultLedgerDir(), opts = {}) {
   }
 }
 
-function build(dir, { now = Date.now, lockTimeoutMs = 5000, lockStaleMs = 30000, lockPollMs = 10, pidAlive, testHooks = {} } = {}) {
+function build(dir, { now = Date.now, lockTimeoutMs = 5000, lockMaxAgeMs = 300_000, lockPollMs = 10, pidAlive, io = realIo } = {}) {
   const fileOf = (key) => join(dir, fileNameFor(key));
   const readState = (file) => replay(existsSync(file) ? readFileSync(file, 'utf8') : '');
   const stamp = () => new Date(now()).toISOString();
@@ -80,16 +86,15 @@ function build(dir, { now = Date.now, lockTimeoutMs = 5000, lockStaleMs = 30000,
 
   /** Run fn(state) under the grant's exclusive lock. `fn` returns [entryFields | null, result]. */
   const locked = (file, fn) => {
-    const release = acquireLock(`${file}.lock`, { now, timeoutMs: lockTimeoutMs, staleMs: lockStaleMs, pollMs: lockPollMs, ...(pidAlive ? { pidAlive } : {}) });
+    const release = acquireLock(`${file}.lock`, { now, timeoutMs: lockTimeoutMs, maxAgeMs: lockMaxAgeMs, pollMs: lockPollMs, io, ...(pidAlive ? { pidAlive } : {}) });
     try {
       const st = readState(file);
       const [entries, result] = fn(st);
       let prev = st.last_hash; let seq = st.seq;
-      if (testHooks.betweenCheckAndAppend) testHooks.betweenCheckAndAppend();
       for (const body of entries ?? []) {
         seq += 1;
         const line = JSON.stringify({ v: 1, seq, at: stamp(), prev, ...body });
-        appendLine(file, line);
+        appendLine(file, line, io);
         prev = sha256(line);
       }
       return result;
@@ -178,4 +183,3 @@ export function scanLedgerDir(dir) {
   }
   return out;
 }
-export { GENESIS };

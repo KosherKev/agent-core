@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, readdirSync, statSync, existsSync, rmSync, utimesSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, readdirSync, statSync, existsSync, rmSync, utimesSync, realpathSync, writeSync, fsyncSync, fstatSync } from 'node:fs';
 import { execFileSync, spawn } from 'node:child_process';
 import { tmpdir, homedir } from 'node:os';
 import { join, dirname, resolve, sep } from 'node:path';
@@ -122,19 +122,18 @@ test('ledger: a lock timeout refuses', () => {
   assert.equal(lines(dir).length, 1, 'nothing was appended');
 });
 
-test('ledger: a stale lock from a dead pid is recovered, a live pid lock is not broken', async () => {
+test('ledger: a dead-pid lock is never broken, whatever its age, and the refusal names the lock and the clearing command', async () => {
   const dir = tdir();
   const dead = spawn(process.execPath, ['-e', '0']); await new Promise((res) => dead.on('exit', res));
-  const l = openLedger(dir, { lockTimeoutMs: 300, lockPollMs: 5, lockStaleMs: 1000 });
+  const l = openLedger(dir, { lockTimeoutMs: 300, lockPollMs: 5 });
   const r = l.openRun(grant(), 'run-1');
-  const lock = join(dir, `${files(dir)[0]}.lock`);
-  const plant = (pid, ageMs) => { mkdirSync(lock); writeFileSync(join(lock, 'owner.json'), JSON.stringify({ pid, at_ms: Date.now() - ageMs })); };
-  // dead pid but FRESH lock: not old enough, not broken
-  plant(dead.pid, 10); assert.throws(() => r.reserve({ micro: 1 }), /lock timeout/); rmSync(lock, { recursive: true });
-  // live pid and OLD lock: not broken
-  plant(process.pid, 60_000); assert.throws(() => r.reserve({ micro: 1 }), /lock timeout/); assert.ok(existsSync(lock)); rmSync(lock, { recursive: true });
-  // dead pid and old: recovered
-  plant(dead.pid, 60_000);
+  const lock = join(realpathSync.native(dir), `${files(dir)[0]}.lock`);
+  for (const ageMs of [10, 60_000, 86_400_000]) {
+    mkdirSync(lock); writeFileSync(join(lock, 'owner.json'), JSON.stringify({ pid: dead.pid, at_ms: Date.now() - ageMs }));
+    assert.throws(() => r.reserve({ micro: 1 }), (e) => e instanceof LedgerError && e.message.includes(lock) && e.message.includes(`rm -r '${lock}'`) && /no longer running/.test(e.message));
+    assert.ok(existsSync(lock), 'not removed'); rmSync(lock, { recursive: true });
+  }
+  assert.equal(lines(dir).length, 1, 'nothing was appended');
   r.reserve({ micro: 1 });
   assert.equal(existsSync(lock), false, 'the lock is released after use');
 });
@@ -226,4 +225,122 @@ test('ledger: no API-key-shaped or unexpected free text can enter a line (only i
   assert.throws(() => r.endRun('sk-or-v1-FAKEKEY-for-tests-only-0123456789'));
   r.endRun('completed');
   assert.ok(!readFileSync(join(dir, files(dir)[0]), 'utf8').includes('sk-or'));
+});
+
+const real = { writeSync, fsyncSync };
+
+test('ledger durability: a short write is retried until every byte is written, and the line is intact', () => {
+  const dir = tdir(); let shorted = 0;
+  const io = { ...real, writeSync: (fd, buf, off, len) => { if (len > 10 && shorted < 3) { shorted += 1; return writeSync(fd, buf, off, 7); } return writeSync(fd, buf, off, len); } };
+  const l = openLedger(dir, { io }); const r = l.openRun(grant(), 'run-1'); r.settle(r.reserve({ micro: 5 }), 5);
+  assert.ok(shorted >= 3, 'the injected writer really did write short');
+  assert.equal(r.remaining().settled_micro, 5, 'the chain replays cleanly');
+  assert.ok(readFileSync(join(dir, files(dir)[0]), 'utf8').endsWith('\n'));
+});
+
+test('ledger durability: a write that makes no progress refuses with a clear error (never a silent partial append)', () => {
+  const dir = tdir(); let on = false;
+  const io = { ...real, writeSync: (fd, buf, off, len) => (on ? 0 : writeSync(fd, buf, off, len)) };
+  const l = openLedger(dir, { io }); const r = l.openRun(grant(), 'run-1');
+  on = true;
+  assert.throws(() => r.reserve({ micro: 1 }), (e) => e instanceof LedgerError && /short write|lock/.test(e.message));
+});
+
+test('ledger durability: an impossible write return value refuses', () => {
+  const dir = tdir(); let on = false;
+  const io = { ...real, writeSync: (fd, buf, off, len) => (on ? len + 5 : writeSync(fd, buf, off, len)) };
+  const l = openLedger(dir, { io }); const r = l.openRun(grant(), 'run-1'); on = true;
+  assert.throws(() => r.reserve({ micro: 1 }), LedgerError);
+});
+
+test('ledger durability: files are fsynced after every append, and directories after a new ledger file or a lock appears', () => {
+  const dir = tdir(); const calls = [];
+  const io = { ...real, fsyncSync: (fd) => { calls.push(fstatSync(fd).isDirectory() ? 'dir' : 'file'); return fsyncSync(fd); } };
+  const l = openLedger(dir, { io });
+  l.openRun(grant(), 'run-1'); // new ledger file: lock (file, tmp dir, parent dir) + ledger file + its directory
+  assert.deepEqual(calls, ['file', 'dir', 'dir', 'file', 'dir']);
+  calls.length = 0;
+  l.openRun(grant(), 'run-2'); // existing ledger file: lock (3) + ledger file only
+  assert.deepEqual(calls, ['file', 'dir', 'dir', 'file']);
+});
+
+test('ledger durability: a failing fsync refuses and does not leave the lock behind', () => {
+  const dir = tdir(); let fail = false;
+  const io = { ...real, fsyncSync: (fd) => { if (fail) { const e = new Error('x'); e.code = 'EIO'; throw e; } return fsyncSync(fd); } };
+  const l = openLedger(dir, { io }); const r = l.openRun(grant(), 'run-1'); fail = true;
+  assert.throws(() => r.reserve({ micro: 1 }), LedgerError);
+  fail = false;
+  r.reserve({ micro: 1 }); // lock was not left behind by the failed attempt
+});
+
+test('ledger operator errors: a lock with a missing, corrupt, unreadable or malformed owner refuses at once, names the lock and the command, and is never removed', () => {
+  const dir = tdir(); const l = openLedger(dir, { lockTimeoutMs: 5000, lockPollMs: 5 });
+  const r = l.openRun(grant(), 'run-1');
+  const lock = join(realpathSync.native(dir), `${files(dir)[0]}.lock`);
+  const cases = {
+    'no owner.json': () => writeFileSync(join(lock, 'stray'), 'x'),
+    'corrupt owner.json': () => writeFileSync(join(lock, 'owner.json'), '{not json'),
+    'unreadable owner.json': () => mkdirSync(join(lock, 'owner.json')),
+    'malformed owner (pid is a string)': () => writeFileSync(join(lock, 'owner.json'), JSON.stringify({ pid: 'abc', at_ms: 1 })),
+    'malformed owner (no at_ms)': () => writeFileSync(join(lock, 'owner.json'), JSON.stringify({ pid: 1 })),
+  };
+  for (const [name, make] of Object.entries(cases)) {
+    mkdirSync(lock); make();
+    const t0 = Date.now();
+    assert.throws(() => r.reserve({ micro: 1 }), (e) => e instanceof LedgerError && e.message.includes(lock) && e.message.includes(`rm -r '${lock}'`) && /NOT broken automatically/.test(e.message), name);
+    assert.ok(Date.now() - t0 < 2000, `${name}: refuses promptly, not after the full lock timeout`);
+    assert.ok(existsSync(lock), `${name}: the lock is left in place`);
+    rmSync(lock, { recursive: true });
+  }
+  assert.equal(lines(dir).length, 1, 'nothing was appended');
+  r.reserve({ micro: 1 });
+});
+
+test('ledger operator errors: a live pid holding the lock past the maximum age refuses with the pid, the age and the command; under the maximum it waits', () => {
+  const dir = tdir(); const l = openLedger(dir, { lockTimeoutMs: 150, lockPollMs: 5, lockMaxAgeMs: 1000 });
+  const r = l.openRun(grant(), 'run-1');
+  const lock = join(realpathSync.native(dir), `${files(dir)[0]}.lock`);
+  mkdirSync(lock); writeFileSync(join(lock, 'owner.json'), JSON.stringify({ pid: process.pid, at_ms: Date.now() - 5000 }));
+  assert.throws(() => r.reserve({ micro: 1 }), (e) => e instanceof LedgerError && e.message.includes(lock) && e.message.includes(`pid ${process.pid}`) && /maximum/.test(e.message) && e.message.includes(`rm -r '${lock}'`));
+  assert.ok(existsSync(lock)); rmSync(lock, { recursive: true });
+  mkdirSync(lock); writeFileSync(join(lock, 'owner.json'), JSON.stringify({ pid: process.pid, at_ms: Date.now() }));
+  assert.throws(() => r.reserve({ micro: 1 }), /lock timeout on /); // young live lock: waits, then times out
+  assert.ok(existsSync(lock));
+});
+
+test('ledger operator errors: the clearing command quotes a path containing a single quote', () => {
+  const base = mkdtempSync(join(tmpdir(), "ledger-q'uote-")); const lock = join(base, 'x.lock'); mkdirSync(lock); writeFileSync(join(lock, 'owner.json'), '{');
+  assert.throws(() => acquireLock(lock, { timeoutMs: 50, pollMs: 5 }), (e) => e.message.includes(`rm -r '${base.replace(/'/g, `'\\''`)}/x.lock'`));
+});
+
+test('ledger lock wait: the timeout is honoured even with a long poll interval, and it sleeps rather than spins', () => {
+  const dir = tdir(); const l = openLedger(dir, { lockTimeoutMs: 120, lockPollMs: 5000 });
+  const r = l.openRun(grant(), 'run-1');
+  const lock = join(realpathSync.native(dir), `${files(dir)[0]}.lock`);
+  mkdirSync(lock); writeFileSync(join(lock, 'owner.json'), JSON.stringify({ pid: process.pid, at_ms: Date.now() }));
+  const t0 = Date.now(); const cpu0 = process.cpuUsage();
+  assert.throws(() => r.reserve({ micro: 1 }), /lock timeout on /);
+  const elapsed = Date.now() - t0; const cpu = process.cpuUsage(cpu0);
+  assert.ok(elapsed >= 100 && elapsed < 1500, `refused near the 120ms timeout, not after the 5000ms poll (took ${elapsed}ms)`);
+  assert.ok((cpu.user + cpu.system) / 1000 < elapsed * 0.6, 'the wait did not burn CPU');
+  assert.equal(lines(dir).length, 1);
+});
+
+test('ledger lock cleanup: release leaves a lock that is no longer ours alone', () => {
+  const base = mkdtempSync(join(tmpdir(), 'ledger-rel-')); const lock = join(base, 'x.lock');
+  const release = acquireLock(lock, { timeoutMs: 50, pollMs: 5 });
+  rmSync(lock, { recursive: true }); // an operator clears it by hand ...
+  mkdirSync(lock); writeFileSync(join(lock, 'owner.json'), JSON.stringify({ pid: process.pid, at_ms: Date.now(), token: 'someone-else' })); // ... and another run takes it
+  release();
+  assert.ok(existsSync(lock), 'the successor lock was not removed');
+});
+
+test('ledger cleanup: no GENESIS re-export and no test hook in the production API', async () => {
+  const idx = await import('../src/ledger/index.js');
+  assert.equal('GENESIS' in idx, false);
+  for (const f of ['ledger.js', 'lock.js', 'durable.js', 'report.js', 'index.js']) {
+    const src = readFileSync(join(REPO, 'src/ledger', f), 'utf8');
+    assert.ok(!/testHooks|betweenCheckAndAppend/.test(src), `${f} has no test hook`);
+  }
+  assert.ok(!/export \{ GENESIS \}/.test(readFileSync(join(REPO, 'src/ledger/ledger.js'), 'utf8')));
 });

@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, readdirSync, readFileSync, writeFileSync, existsSync } from 'node:fs';
+import { mkdtempSync, readdirSync, readFileSync, writeFileSync, existsSync, mkdirSync, cpSync, symlinkSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join, dirname, resolve } from 'node:path';
@@ -48,4 +48,54 @@ test('ledger report: a missing directory is reported, not created', () => {
   assert.equal(out.status, 0);
   assert.match(out.stdout, /No ledger directory yet/);
   assert.equal(existsSync(dir), false);
+});
+
+const corrupt = (dir) => { // two grants' worth of damage: delete a middle line from one ledger
+  const l = openLedger(dir); const r = l.openRun(grant({ task_id: 'g-corrupt' }), 'run-1'); r.reserve({ micro: 1 }); r.reserve({ micro: 1 });
+  const f = readdirSync(dir).filter((n) => n.endsWith('.jsonl')).map((n) => join(dir, n))[0];
+  const ls = readFileSync(f, 'utf8').trim().split('\n'); ls.splice(1, 1); writeFileSync(f, ls.join('\n') + '\n');
+};
+const run = (script, dir) => spawnSync(process.execPath, [script, '--dir', dir], { encoding: 'utf8' });
+
+test('ledger report: a repo path containing a space still runs the CLI and flags a corrupt ledger', () => {
+  const dir = tdir(); corrupt(dir);
+  const copy = join(mkdtempSync(join(tmpdir(), 'ledger rep space-')), 'my repo');
+  mkdirSync(copy); cpSync(join(REPO, 'src'), join(copy, 'src'), { recursive: true });
+  const out = run(join(copy, 'src/ledger/report.js'), dir);
+  assert.equal(out.status, 1, `stdout=${out.stdout} stderr=${out.stderr}`);
+  assert.match(out.stdout, /ERROR .*hash chain broken/);
+  assert.match(out.stderr, /failed verification/);
+});
+
+test('ledger report: a symlinked invocation path still runs the CLI and flags a corrupt ledger', () => {
+  const dir = tdir(); corrupt(dir);
+  const link = join(mkdtempSync(join(tmpdir(), 'ledger-rep-link-')), 'report-link.js');
+  symlinkSync(join(REPO, 'src/ledger/report.js'), link);
+  const out = run(link, dir);
+  assert.equal(out.status, 1, `stdout=${out.stdout} stderr=${out.stderr}`);
+  assert.match(out.stdout, /ERROR .*hash chain broken/);
+});
+
+test('ledger report: a space path AND a symlink together, with a healthy ledger, print the report and exit 0', () => {
+  const dir = tdir(); openLedger(dir).openRun(grant(), 'run-1');
+  const base = mkdtempSync(join(tmpdir(), 'ledger rep both-'));
+  const copy = join(base, 'my repo'); mkdirSync(copy); cpSync(join(REPO, 'src'), join(copy, 'src'), { recursive: true });
+  const link = join(base, 'link to report.js'); symlinkSync(join(copy, 'src/ledger/report.js'), link);
+  const out = run(link, dir);
+  assert.equal(out.status, 0, out.stderr);
+  assert.match(out.stdout, /Grant g-report/);
+});
+
+test('ledger report: an unexpected ledger error exits non-zero with a clear message', () => {
+  const dir = tdir(); corrupt(dir);
+  const out = spawnSync(process.execPath, [join(REPO, 'src/ledger/report.js'), '--dir', join(dir, readdirSync(dir)[0])], { encoding: 'utf8' }); // a file, not a directory
+  assert.notEqual(out.status, 0);
+  assert.match(out.stderr, /ledger:report: ERROR/);
+});
+
+test('ledger report: isCliEntry fails closed when the comparison throws, and is false when imported', async () => {
+  const { isCliEntry } = await import('../src/ledger/report.js');
+  assert.equal(isCliEntry('/definitely/not/a/real/path/x.js'), true);
+  assert.equal(isCliEntry(undefined), false);
+  assert.equal(isCliEntry(join(REPO, 'test/ledger.test.js')), false);
 });
