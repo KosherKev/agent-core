@@ -251,35 +251,69 @@ export async function runBuilder({ config, task }, opts = {}) {
   }
 }
 
-/** One chat/completions request. Returns { choice } or { stop: {status, code} } after journaling why. */
-async function requestModel({ config, messages, fetchFn, rec, redact, step }) {
+/** Parse a Retry-After header (delta-seconds or HTTP date) to milliseconds, or null. */
+export function parseRetryAfter(v, now = Date.now()) {
+  if (v === null || v === undefined || v === '') return null;
+  if (/^\d+(\.\d+)?$/.test(String(v).trim())) return Math.round(Number(v) * 1000);
+  const t = Date.parse(v);
+  return Number.isNaN(t) ? null : Math.max(0, t - now);
+}
+
+/**
+ * One chat/completions request, with bounded rate-limit handling.
+ * On HTTP 429 (or a daily-cap error body): honour Retry-After, else exponential
+ * backoff from base_delay_ms; retry at most rate_limit.max_retries times; a wait
+ * above max_delay_ms, or a daily cap, stops immediately. Stopping journals an
+ * issue of kind rate-limit and returns exit code RATE_LIMITED.
+ * Returns { choice } or { stop: {status, code} } after journaling why.
+ */
+async function requestModel({ config, messages, fetchFn, sleep, rec, redact, step }) {
   const body = { model: config.model, messages, tools: TOOLS };
   if (Object.keys(config.provider).length) body.provider = config.provider;
-  let res; let text;
-  try {
-    res = await fetchFn(`${config.base_url}/chat/completions`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json', authorization: `Bearer ${config.apiKey}` },
-      body: JSON.stringify(body),
-      signal: AbortSignal.timeout(config.request_timeout_ms),
-    });
-    text = await res.text();
-  } catch (err) {
-    rec.attempt(`model step ${step}`, 'failed', `network error: ${redactError(err, redact).message.slice(0, 200)}`);
-    return { stop: { status: 'failed', code: EXIT.FAILED } };
+  const rl = config.rate_limit;
+  let retries = 0;
+  for (;;) {
+    let res; let text;
+    try {
+      res = await fetchFn(`${config.base_url}/chat/completions`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', authorization: `Bearer ${config.apiKey}` },
+        body: JSON.stringify(body),
+        signal: AbortSignal.timeout(config.request_timeout_ms),
+      });
+      text = await res.text();
+    } catch (err) {
+      rec.attempt(`model step ${step}`, 'failed', `network error: ${redactError(err, redact).message.slice(0, 200)}`);
+      return { stop: { status: 'failed', code: EXIT.FAILED } };
+    }
+    let json = null;
+    try { json = JSON.parse(text); } catch { /* non-JSON body */ }
+    if (!res.ok) {
+      const detail = redact(String(json?.error?.message ?? text).slice(0, 200));
+      const dailyCap = /per[- ]day|daily/i.test(detail);
+      if (res.status === 429 || dailyCap) {
+        const hinted = parseRetryAfter(res.headers.get('retry-after'));
+        const delay = hinted ?? Math.min(rl.base_delay_ms * 2 ** retries, rl.max_delay_ms);
+        const giveUp = dailyCap ? 'daily cap reached' : retries >= rl.max_retries ? `still limited after ${retries} retries` : delay > rl.max_delay_ms ? `Retry-After ${delay}ms exceeds the ${rl.max_delay_ms}ms cap` : null;
+        if (!giveUp) {
+          retries += 1;
+          rec.attempt(`model step ${step}`, 'failed', `HTTP ${res.status} rate limited; waiting ${delay}ms (retry ${retries}/${rl.max_retries}): ${detail}`);
+          await sleep(delay);
+          continue;
+        }
+        rec.attempt(`model step ${step}`, 'blocked', `HTTP ${res.status} rate limited: ${giveUp}: ${detail}`);
+        rec.issue('rate-limit', 'risk', 'medium', `Stopped after rate limiting (${giveUp}; ${retries} retries). Work so far is committed on the branch.`, 'Wait for the limit to reset (or add credits), then rerun the task on the same branch.');
+        return { stop: { status: 'rate-limited', code: EXIT.RATE_LIMITED } };
+      }
+      const notFound = res.status === 404 || /model.*(not found|does not exist|not a valid|unavailable)|no endpoints found/i.test(detail);
+      rec.attempt(`model step ${step}`, 'failed', notFound ? `model not found or unavailable (HTTP ${res.status}): ${detail}` : `HTTP ${res.status}: ${detail}`);
+      return { stop: { status: 'failed', code: EXIT.FAILED } };
+    }
+    const choice = json?.choices?.[0];
+    if (!choice || typeof choice !== 'object') {
+      rec.attempt(`model step ${step}`, 'failed', 'response has no choices (malformed)');
+      return { stop: { status: 'failed', code: EXIT.FAILED } };
+    }
+    return { choice };
   }
-  let json = null;
-  try { json = JSON.parse(text); } catch { /* non-JSON body */ }
-  if (!res.ok) {
-    const detail = redact(String(json?.error?.message ?? text).slice(0, 200));
-    const notFound = res.status === 404 || /model.*(not found|does not exist|not a valid|unavailable)|no endpoints found/i.test(detail);
-    rec.attempt(`model step ${step}`, 'failed', notFound ? `model not found or unavailable (HTTP ${res.status}): ${detail}` : `HTTP ${res.status}: ${detail}`);
-    return { stop: { status: 'failed', code: EXIT.FAILED } };
-  }
-  const choice = json?.choices?.[0];
-  if (!choice || typeof choice !== 'object') {
-    rec.attempt(`model step ${step}`, 'failed', 'response has no choices (malformed)');
-    return { stop: { status: 'failed', code: EXIT.FAILED } };
-  }
-  return { choice };
 }
