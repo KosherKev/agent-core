@@ -325,11 +325,11 @@ export async function runBuilder({ config, task }, opts = {}) {
  * The single tool-dispatch chokepoint. Every tool (read_file, write_file, list_dir) runs only through here, and only after the
  * meter has checked expiry and counted the call against max_tool_calls. Without a real meter it throws before touching anything.
  */
-export function dispatchTool(meter, { workdir, allowed, written }, name, args) {
+export function dispatchTool(meter, { workdir, allowed, written, protectedDirs = [] }, name, args) {
   if (!isMeter(meter)) throw new GrantError('grant', 'no grant meter: refusing to run a tool');
   meter.checkTool();
   if (name === 'read_file') {
-    const { abs } = confine(workdir, args.path);
+    const { abs } = confine(workdir, args.path, { protectedDirs });
     // Open first, check it is a regular file, then read at most MAX_READ_BYTES (no whole-file read, no FIFO hang).
     const fd = openSync(abs, 'r');
     try {
@@ -340,11 +340,11 @@ export function dispatchTool(meter, { workdir, allowed, written }, name, args) {
     } finally { closeSync(fd); }
   }
   if (name === 'list_dir') {
-    const { abs } = confine(workdir, args.path, { allowRoot: true });
+    const { abs } = confine(workdir, args.path, { allowRoot: true, protectedDirs });
     return readdirSync(abs).filter((n) => n !== '.agent-runs' && !isReadDenied(n)).sort().map((n) => (statSync(join(abs, n)).isDirectory() ? `${n}/` : n)).join('\n');
   }
   if (name !== 'write_file') throw new ConfineError('unknown tool', true);
-  const { abs, rel } = confine(workdir, args.path, { write: true, allowedPaths: allowed });
+  const { abs, rel } = confine(workdir, args.path, { write: true, allowedPaths: allowed, protectedDirs });
   if (Buffer.byteLength(args.content) > LIMITS.MAX_FILE_BYTES) throw new ConfineError('file too large');
   mkdirSync(dirname(abs), { recursive: true });
   writeFileSync(abs, args.content);
