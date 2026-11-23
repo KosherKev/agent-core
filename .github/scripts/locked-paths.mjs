@@ -6,8 +6,50 @@ export function parseLocked(text) {
   return text.split('\n').map((l) => l.trim()).filter((l) => l && !l.startsWith('#'));
 }
 
+// ---- Matching: compare paths the way the machines that check them out do. ----------------------------
+// Git records paths byte for byte, but macOS (APFS, HFS+) and Windows (NTFS) compare names without regard to
+// case, ignore some invisible characters, drop trailing dots and spaces, and treat a backslash as a separator.
+// On those disks `ACCEPTANCE/x` IS `acceptance/x`: a path that is "different" to git lands on the locked file
+// once checked out. So every comparison here is made on folded segments. Over-matching is the safe direction.
+
+// Zero-width, bidi and soft-hyphen characters that some filesystems ignore when comparing names.
+const IGNORABLE = /[\u00AD\u200B-\u200F\u202A-\u202E\u2060-\u206F\uFEFF]/g;
+
+/** One path segment, folded the way a case-insensitive, normalisation-insensitive filesystem compares it. */
+export function foldSegment(s) {
+  // Case goes through upper case and back, so the long s, the sharp s and the Kelvin sign fold as they do on disk.
+  return s.normalize('NFD').replace(IGNORABLE, '').normalize('NFC').toUpperCase().toLowerCase().normalize('NFC');
+}
+// Trailing dots and spaces are dropped (Windows). A ":" starts an NTFS alternate data stream (`.github::$INDEX_ALLOCATION`).
+const fold = (seg) => foldSegment(seg.split(':')[0]).replace(/[. ]+$/, '');
+
+/** A path as folded segments. A backslash separates segments, as it does on Windows. */
+export function foldPath(p) {
+  return p.split(/[\\/]/).filter((s) => s && s !== '.').map(fold);
+}
+
+/** `.git` and every spelling a filesystem could resolve to it, plus `.gitmodules` and `.gitattributes`. */
+export function isGitLikeSegment(seg) {
+  const f = fold(seg);
+  return f === '.git' || f === '.gitmodules' || f === '.gitattributes' || /^\.git~\d*/.test(f) || /^git~\d+$/.test(f);
+}
+
+function underFolded(segs, entry) {
+  const e = foldPath(entry);
+  return e.length > 0 && e.length <= segs.length && e.every((s, i) => s === segs[i]);
+}
+
+/**
+ * Is this repo-relative path locked? True for anything at or under a locked entry (case, unicode, invisible
+ * characters, trailing dots and spaces, backslashes all folded), for every `.git`-like segment anywhere, and for
+ * a file named CODEOWNERS anywhere. An entry ending in "/" locks that directory; an entry without it locks
+ * that path and anything under it.
+ */
 export function isLocked(file, locked) {
-  return locked.some((p) => (p.endsWith('/') ? file.startsWith(p) : file === p));
+  const segs = foldPath(file);
+  if (segs.some(isGitLikeSegment)) return true;
+  if (segs.length && segs[segs.length - 1] === 'codeowners') return true;
+  return locked.some((p) => underFolded(segs, p));
 }
 
 /** Returns the list of changed files that sit on locked paths. */
