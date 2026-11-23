@@ -1,0 +1,4 @@
+# Paths an agent-authored change must never modify (rule R4). One per line.
+# A trailing slash means "everything under this directory".
+acceptance/
+.github/

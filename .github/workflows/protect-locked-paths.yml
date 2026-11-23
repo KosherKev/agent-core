@@ -1,0 +1,30 @@
+name: protect-locked-paths
+on:
+  pull_request:
+    branches: [main]
+permissions:
+  contents: read
+jobs:
+  locked-paths:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Fail if an agent-authored change touches locked paths
+        env:
+          HEAD_REF: ${{ github.head_ref }}
+          ACTOR: ${{ github.event.pull_request.user.login }}
+          AGENT_AUTHORED: ${{ contains(github.event.pull_request.labels.*.name, 'agent-authored') }}
+        run: node .github/scripts/locked-paths.mjs "${{ github.event.pull_request.base.sha }}" "${{ github.event.pull_request.head.sha }}"
+  tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci --ignore-scripts
+      - run: npm run check:self-model
+      - run: npm test
