@@ -77,3 +77,66 @@
 - Deviations: root README.md edited (two statements about the old workflow were factually wrong now); ADR-0003 addendum left as is (still accurate). tests.yml keeps node 24 and the old step order.
 - Status: complete on branch task/contracts-and-schemas, awaiting review. Not pushed, not merged.
 - Next step: Kevin reviews the locked-path changes above first, then pushes.
+
+# LOG - Spec C
+
+(New top-level section: the existing LOG.md history above is kept; entries there are per-task dated notes, this one follows the Spec C template.)
+
+## What was done
+Built the OpenRouter builder adapter in agent-core, items 1-6 of the spec, in new files only.
+1. Config: `src/builder-config.js` (loader, `ConfigError`), `src/builder-redact.js`. Env, optional untracked `.agent-builder.local.json` (added to `.gitignore` with `.agent-runs/`), defaults per spec. API key env only (a key-like field in the file is an error), attached as a non-enumerable property, redacted from journal, errors, stacks and commits. Provider prefs passthrough. `FREE_MODEL_REPO_ALLOWLIST` default `["agent-core"]`. `role` accepts only `builder`.
+2. Adapter: `src/builder-adapter.js` (tool loop on built-in fetch, no new dependencies), `src/builder-confine.js` (path confinement), `src/builder-capabilities.js` (4 manifests, all with undo, validated with the existing validator). Journal entries (reservation, attempt, issue) go through `createJournal().append`.
+3. Rate limits: 429 or daily-cap error handled with bounded backoff, then a clean stop (see RATE-LIMIT BEHAVIOUR).
+4. Tests: `test/builder-config.test.js` (7) and `test/builder-adapter.test.js` (25) with `test/builder-mock.js`, a local mock server on 127.0.0.1 with an ephemeral port. Two model IDs both complete; mocks for 429, malformed tool calls, refusal, truncation, 404 model-not-found.
+5. `npm run builder:smoke` (`scripts/builder-smoke.js`): runs one tiny task in a throwaway local clone against the real endpoint. NOT RUN by this task.
+6. Contract gaps journaled at runtime as issues of kind `contract-gap` and listed below.
+Also: self-model regenerated (the generator indexes top-level `src/*.js`, so the adapter files are flat `src/builder-*.js` rather than `src/builder/`); README section.
+
+## Commands run and results (with counts)
+- Baseline on origin/main (de64e51): 111 tests (not re-run before changes; `npm ci --ignore-scripts` clean, 0 vulnerabilities).
+- `npm test` Node 22.23.5: 143 tests, 143 pass, 0 fail, 0 skipped (111 + 7 config + 25 adapter).
+- `npm test` Node 24.22.3: 143 tests, 143 pass, 0 fail, 0 skipped.
+- `npm run build`: wrote self-model.json (8 modules, 5 contracts, 5 ADRs). `npm run check:self-model`: up to date.
+- `npm audit --omit=dev`: 0 vulnerabilities.
+- `git diff --name-only origin/main...HEAD`: no path under acceptance/, .github/, schemas/, or src/validators.js.
+- Local guard dry-run `node .github/scripts/locked-paths.mjs <origin/main sha> <HEAD sha>`: exit 0.
+- Not run, by design: `npm run builder:smoke`, any real network call, any real key.
+
+## Decisions and why
+- Task shape: the contract has no task-spec schema, so a task is `{repo, goal, grant, workdir, branch?}` with `grant` validated by the existing grant validator (see gaps). Grant scope, `max_tool_calls`, `expires_at` and risk tier low are enforced before any network call.
+- Exit codes: 0 ok, 1 failed (model not found, refusal, truncation twice, malformed x3, budget, HTTP/network error), 2 refused before any network call (config, allowlist, expired grant, protected branch), 3 rate-limited.
+- The adapter refuses to build on main/master/develop or detached HEAD, and commits only the files the model wrote, by explicit path.
+- Truncation: the cut-off reply is discarded and the model is told once to use smaller steps; a second truncation stops. Malformed tool call: error returned to the model; 3 in a row stops.
+- Flat file layout `src/builder-*.js` so the existing self-model generator lists the adapter without changing it.
+- Key safety: key is never put in an entry; every string is additionally passed through a redactor (exact key, `sk-or-...` shape, `Bearer ...`) before append, commit message, tool reply or thrown error; stacks are rebuilt redacted.
+
+## CONTRACT GAPS (file, what was awkward, how it was handled)
+- schemas/v1/run-journal-entry.schema.json: issue entries have no `kind` field (category is bug/risk/improvement, unevaluatedProperties false). Handled: description prefixed `[kind: rate-limit]`, `[kind: contract-gap]`, etc., with the nearest category (rate-limit=risk, contract-gap=improvement).
+- schemas/v1/run-journal-entry.schema.json: no failure entry kind. Handled: `attempt` with outcome `failed` or `blocked`.
+- schemas/v1/grant.schema.json: no task-spec schema (no goal, repo identity, branch). Handled: adapter wrapper object, grant validated only.
+- schemas/v1/grant.schema.json: `scope.paths` semantics unspecified. Handled: relative prefixes; `.`, `*`, `**` mean all.
+- docs/adr/0003-run-journal.md (src/journal.js): guarantee is in-process only. Handled: adapter mirrors entries to untracked `.agent-runs/<run_id>.jsonl` (no append-only protection on that file).
+- src/self-model.js: only indexes top-level `src/*.js`, no capabilities field, so builder capabilities are not listed in self-model.json (modules are). Not changed.
+- schemas/v1/capability-manifest.schema.json: no registry/publication place for manifests. Handled: validated and written to `.agent-runs/<run_id>.capabilities.json`.
+- No role concept anywhere in the contract; R2 for this builder is enforced by the adapter config only.
+All of the above are journaled as `contract-gap` issues in every run.
+
+## RATE-LIMIT BEHAVIOUR (documented exit code, backoff bounds)
+- Exit code 3 (`EXIT.RATE_LIMITED`).
+- Trigger: HTTP 429, or any error body mentioning a per-day/daily cap.
+- Wait: the `Retry-After` header (seconds or HTTP date) if present, else exponential `base_delay_ms * 2^n` (1s, 2s, 4s), capped at `max_delay_ms` (30s). Defaults: `max_retries` 3, so at most 4 requests per step and 7s to 90s of waiting. Configurable only inside bounds: max_retries 0-5, max_delay_ms up to 120000.
+- Stops immediately (no waiting) on a daily cap or a `Retry-After` above `max_delay_ms`.
+- On stop: attempt entry (blocked), issue `[kind: rate-limit]` (risk/medium), work so far committed on the branch, status `rate-limited`.
+- Model not found (404 or equivalent) is a journaled failed attempt, exit 1, no throw.
+
+## CHANGED LOCKED PATHS (expected: none)
+None. `git diff --name-only origin/main...HEAD` lists only: .gitignore, LOG.md, README.md, package.json, scripts/builder-smoke.js, self-model.json, src/builder-*.js (5 files), test/builder-*.js (3 files).
+
+## Open questions for Kevin
+- Template conflict: the existing LOG.md uses dated per-task entries; this Spec C section follows the template exactly and is appended.
+- Should the contract gain a task-spec schema, an issue `kind` field and a failure entry kind (new schema version)?
+- The smoke script clones this repo locally and works in a temp dir; confirm that is the low-risk public-repo task you wanted (it makes no push).
+- `particle-ai/particle-1:free` could not be verified (no network); the id is config only.
+
+## Run-journal issues raised
+Per run, the adapter journals: one reservation (free/third-party model data policy doubt); one `[kind: contract-gap]` issue per gap above (7); `[kind: rate-limit]` on a rate-limit stop; `[kind: refusal]`, `[kind: truncation]`, `[kind: malformed-tool-calls]` when those stop a run. Entries are only produced when the adapter runs; none were produced against any real endpoint during this task.
