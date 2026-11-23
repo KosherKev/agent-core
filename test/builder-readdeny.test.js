@@ -59,10 +59,31 @@ test('read denylist: list_dir hides secrets and git internals; reads cap at the 
     const config = loadConfig({ env: { OPENROUTER_API_KEY: FAKE_KEY, AGENT_BUILDER_BASE_URL: mock.url }, cwd: tmpdir() });
     await runBuilder({ config, task: { repo: 'agent-core', goal: 'g', grant: makeGrant({ budget: { max_usd: 1, max_tool_calls: 20 } }), workdir: dir } });
     const [l1, l2, r1, r2] = mock.requests[1].body.messages.filter((m) => m.role === 'tool').map((m) => m.content);
-    for (const hidden of ['.env', '.git\n', '.ssh', '.aws', '.agent-builder.local.json', '.npmrc']) assert.ok(!(`\n${l1}\n`).includes(`\n${hidden.trim()}`) && !(`\n${l1}\n`).includes(`\n${hidden.trim()}/`), hidden);
+    const l1Names = l1.split('\n').map((n) => n.replace(/\/$/, ''));
+    for (const hidden of ['.env', '.git', '.ssh', '.aws', '.agent-builder.local.json', '.npmrc']) assert.ok(!l1Names.includes(hidden), hidden);
     for (const hidden of ['key.pem', 'server.key', 'id_rsa', 'api-token.txt', 'Credentials.json', 'cert.crt']) assert.ok(!l2.includes(hidden), hidden);
     assert.ok(l2.includes('ok.md') && l2.includes('big.md'));
     assert.equal(r1.length, 50000);
     assert.match(r2, /^ERROR:/);
   } finally { await mock.close(); }
+});
+
+test('list_dir accepts the repository root (., ./, empty) but hides .git and denylisted names; writes to the root stay refused', async () => {
+  const dir = repoWithSecrets();
+  const calls = ['.', './', ''].map((p, i) => toolCall('list_dir', { path: p }, `r${i}`));
+  const mock = await startMock((_r, n) => (n === 1 ? reply({ tool_calls: calls }, 'tool_calls') : reply({ content: 'done' })));
+  try {
+    const config = loadConfig({ env: { OPENROUTER_API_KEY: FAKE_KEY, AGENT_BUILDER_BASE_URL: mock.url }, cwd: tmpdir() });
+    await runBuilder({ config, task: { repo: 'agent-core', goal: 'g', grant: makeGrant({ budget: { max_usd: 1, max_tool_calls: 20 } }), workdir: dir } });
+    const outs = mock.requests[1].body.messages.filter((m) => m.role === 'tool').map((m) => m.content);
+    assert.equal(outs.length, 3);
+    for (const out of outs) {
+      assert.ok(!out.startsWith('ERROR'), out);
+      const names = out.split('\n').map((n) => n.replace(/\/$/, ''));
+      assert.ok(names.includes('docs'), out);
+      for (const hidden of ['.git', '.env', '.env.local', '.envrc', '.ssh', '.aws', '.agent-builder.local.json', '.npmrc', '.agent-runs']) assert.ok(!names.includes(hidden), hidden);
+    }
+  } finally { await mock.close(); }
+  for (const p of ['.', './', '']) assert.throws(() => confine(dir, p, { write: true, allowRoot: true }), ConfineError, p);
+  assert.throws(() => confine(dir, '.'), ConfineError);
 });

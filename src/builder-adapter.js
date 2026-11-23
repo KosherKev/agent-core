@@ -214,7 +214,7 @@ export async function runBuilder({ config, task }, opts = {}) {
         } finally { closeSync(fd); }
       }
       if (name === 'list_dir') {
-        const { abs } = confine(workdir, args.path);
+        const { abs } = confine(workdir, args.path, { allowRoot: true });
         return readdirSync(abs).filter((n) => n !== '.agent-runs' && !isReadDenied(n)).sort().map((n) => (statSync(join(abs, n)).isDirectory() ? `${n}/` : n)).join('\n');
       }
       const { abs, rel } = confine(workdir, args.path, { write: true, allowedPaths: allowed });

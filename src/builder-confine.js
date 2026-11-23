@@ -88,24 +88,26 @@ export function isReadDenied(rel) {
  *  - rejects every `.git`-like segment (any case, trailing dot/space, `.git~1`, unicode-ignorable chars);
  *  - reads: also rejects the read denylist (secrets, keys, .env*, ...), non-regular files are left to the caller;
  *  - writes: also rejects locked paths (case-insensitive, NFC/NFD folded, via realpath too) and paths outside
- *    the grant's allowed prefixes; the target itself must not be a symlink.
+ *    the grant's allowed prefixes; the target itself must not be a symlink;
+ *  - `allowRoot` (listing only, never with `write`) lets `.`, `./` or an empty path name the worktree root itself.
  */
-export function confine(root, userPath, { write = false, allowedPaths = ['.'] } = {}) {
+export function confine(root, userPath, { write = false, allowedPaths = ['.'], allowRoot = false } = {}) {
   try {
-    return confineInner(root, userPath, { write, allowedPaths });
+    return confineInner(root, userPath, { write, allowedPaths, allowRoot });
   } catch (err) {
     if (err instanceof ConfineError) throw err;
     throw new ConfineError('path check failed; refusing (fail closed)', true);
   }
 }
 
-function confineInner(root, userPath, { write, allowedPaths }) {
-  if (typeof userPath !== 'string' || !userPath) throw new ConfineError('path must be a non-empty string');
+function confineInner(root, userPath, { write, allowedPaths, allowRoot }) {
+  if (typeof userPath !== 'string' || (!userPath && !(allowRoot && !write))) throw new ConfineError('path must be a non-empty string');
   if (userPath.includes('\0') || userPath.includes('\\')) throw new ConfineError('path contains forbidden characters');
   if (isAbsolute(userPath) || /^[A-Za-z]:/.test(userPath)) throw new ConfineError('absolute paths are not allowed');
   if (userPath.split('/').includes('..')) throw new ConfineError('".." segments are not allowed');
   if (userPath.split('/')[0] === '~' || userPath.startsWith('~')) throw new ConfineError('home-relative paths are not allowed');
   const rel = norm(userPath);
+  if (!rel && allowRoot && !write) return { abs: realpathSync.native(root), rel: '', real_rel: '' };
   if (!rel) throw new ConfineError('path must name a file or directory inside the worktree');
   if (foldPath(rel).some(isGitLikeSegment)) throw new ConfineError(`path "${rel}" touches git internals`, write);
 
