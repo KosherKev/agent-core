@@ -1,4 +1,4 @@
-import { mkdtempSync, openSync, closeSync, readFileSync, renameSync, rmSync } from 'node:fs';
+import { mkdtempSync, openSync, closeSync, readFileSync, renameSync, rmSync, lstatSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
 import { join, dirname } from 'node:path';
 import { LedgerError } from './format.js';
@@ -11,7 +11,32 @@ export function defaultPidAlive(pid) {
   try { process.kill(pid, 0); return true; } catch (e) { return e.code === 'EPERM'; }
 }
 
-const readOwner = (lockPath) => { try { return JSON.parse(readFileSync(join(lockPath, 'owner.json'), 'utf8')); } catch { return null; } };
+/** Look at a lock's owner file. Never throws. kind: ok | missing | unreadable | corrupt. */
+function inspectOwner(lockPath) {
+  let raw;
+  try { raw = readFileSync(join(lockPath, 'owner.json'), 'utf8'); } catch (e) { return { kind: e?.code === 'ENOENT' ? 'missing' : 'unreadable', detail: e?.code ?? 'error' }; }
+  let o;
+  try { o = JSON.parse(raw); } catch { return { kind: 'corrupt' }; }
+  if (!o || typeof o !== 'object' || !Number.isSafeInteger(o.pid) || o.pid < 1 || !Number.isFinite(o.at_ms)) return { kind: 'corrupt' };
+  return { kind: 'ok', owner: o };
+}
+const identity = (lockPath) => { try { const st = lstatSync(lockPath); return `${st.dev}:${st.ino}:${st.birthtimeMs}`; } catch { return null; } };
+
+/**
+ * Examine the existing lock. Returns { kind: 'gone' } if it vanished or was replaced while looking (caller just retries), or the
+ * owner inspection. A missing/corrupt owner is only reported if the SAME lock directory (same identity before and after the read)
+ * shows it three times in a row, so the instant a lock is being released and re-taken by others is never mistaken for a bad lock.
+ */
+function examine(lockPath, pollMs) {
+  for (let bad = 0; ; bad += 1) {
+    const before = identity(lockPath);
+    if (before === null) return { kind: 'gone' };
+    const seen = inspectOwner(lockPath);
+    if (identity(lockPath) !== before) return { kind: 'gone' };
+    if (seen.kind === 'ok' || bad >= 2) return seen;
+    sleepSync(Math.max(pollMs, 5));
+  }
+}
 
 const clearCommand = (lockPath) => `rm -r '${String(lockPath).replace(/'/g, `'\\''`)}'`;
 
@@ -24,9 +49,11 @@ const clearCommand = (lockPath) => `rm -r '${String(lockPath).replace(/'/g, `'\\
  * with three or more racing processes a second process can remove the lock a first process has just taken over, leaving two
  * holders and a forked hash chain. With no takeover there is no such step to race. The price is that a crashed holder needs a
  * human; that is the restrictive choice.
+ * A lock with a missing, unreadable or corrupt owner file, or held by a live pid for longer than maxAgeMs, is refused the same way
+ * (message names the lock path and the exact command to clear it by hand).
  * Waits a bounded time for a live holder. Any timeout or error throws (refuse).
  */
-export function acquireLock(lockPath, { now = Date.now, timeoutMs = 5000, pollMs = 10, pidAlive = defaultPidAlive, io = realIo } = {}) {
+export function acquireLock(lockPath, { now = Date.now, timeoutMs = 5000, pollMs = 10, maxAgeMs = 300_000, pidAlive = defaultPidAlive, io = realIo } = {}) {
   const deadline = Date.now() + timeoutMs;
   for (;;) {
     let tmp;
@@ -49,9 +76,20 @@ export function acquireLock(lockPath, { now = Date.now, timeoutMs = 5000, pollMs
       if (err instanceof LedgerError) throw err;
       if (!['EEXIST', 'ENOTEMPTY', 'EISDIR', 'ENOTDIR'].includes(err.code)) throw new LedgerError('ledger', `ledger lock error (${err.code ?? 'unknown'}); refusing`);
     }
-    const owner = readOwner(lockPath);
-    if (owner && Number.isSafeInteger(owner.pid) && !pidAlive(owner.pid)) {
+    // A lock exists. Never break it; only decide between waiting and refusing with instructions.
+    const seen = examine(lockPath, pollMs);
+    if (seen.kind === 'gone') continue; // released or replaced while looking: try to take it
+    if (seen.kind !== 'ok') {
+      const why = { missing: 'has no owner.json', unreadable: `has an unreadable owner.json (${seen.detail})`, corrupt: 'has a corrupt owner.json' }[seen.kind];
+      throw new LedgerError('ledger', `ledger lock ${lockPath} ${why}, so its holder cannot be identified. It is NOT broken automatically. If no agent run is using this ledger, clear it by hand with: ${clearCommand(lockPath)}; refusing`);
+    }
+    const { owner } = seen;
+    if (!pidAlive(owner.pid)) {
       throw new LedgerError('ledger', `ledger lock ${lockPath} is held by pid ${owner.pid}, which is no longer running (a crashed run). It is NOT broken automatically. If no agent run is using this ledger, clear it by hand with: ${clearCommand(lockPath)}; refusing`);
+    }
+    const heldMs = now() - owner.at_ms;
+    if (heldMs > maxAgeMs) {
+      throw new LedgerError('ledger', `ledger lock ${lockPath} has been held by live pid ${owner.pid} for ${Math.round(heldMs / 1000)}s, longer than the ${Math.round(maxAgeMs / 1000)}s maximum (a hung run, or the pid was reused by another program). It is NOT broken automatically. Check that pid ${owner.pid} is really an agent run (ps -p ${owner.pid}); if it is hung, stop it, then clear the lock by hand with: ${clearCommand(lockPath)}; refusing`);
     }
     if (Date.now() >= deadline) throw new LedgerError('ledger', `ledger lock timeout on ${lockPath}; refusing`);
     sleepSync(pollMs);

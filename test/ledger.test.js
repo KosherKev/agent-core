@@ -272,3 +272,43 @@ test('ledger durability: a failing fsync refuses and does not leave the lock beh
   fail = false;
   r.reserve({ micro: 1 }); // lock was not left behind by the failed attempt
 });
+
+test('ledger operator errors: a lock with a missing, corrupt, unreadable or malformed owner refuses at once, names the lock and the command, and is never removed', () => {
+  const dir = tdir(); const l = openLedger(dir, { lockTimeoutMs: 5000, lockPollMs: 5 });
+  const r = l.openRun(grant(), 'run-1');
+  const lock = join(realpathSync.native(dir), `${files(dir)[0]}.lock`);
+  const cases = {
+    'no owner.json': () => writeFileSync(join(lock, 'stray'), 'x'),
+    'corrupt owner.json': () => writeFileSync(join(lock, 'owner.json'), '{not json'),
+    'unreadable owner.json': () => mkdirSync(join(lock, 'owner.json')),
+    'malformed owner (pid is a string)': () => writeFileSync(join(lock, 'owner.json'), JSON.stringify({ pid: 'abc', at_ms: 1 })),
+    'malformed owner (no at_ms)': () => writeFileSync(join(lock, 'owner.json'), JSON.stringify({ pid: 1 })),
+  };
+  for (const [name, make] of Object.entries(cases)) {
+    mkdirSync(lock); make();
+    const t0 = Date.now();
+    assert.throws(() => r.reserve({ micro: 1 }), (e) => e instanceof LedgerError && e.message.includes(lock) && e.message.includes(`rm -r '${lock}'`) && /NOT broken automatically/.test(e.message), name);
+    assert.ok(Date.now() - t0 < 2000, `${name}: refuses promptly, not after the full lock timeout`);
+    assert.ok(existsSync(lock), `${name}: the lock is left in place`);
+    rmSync(lock, { recursive: true });
+  }
+  assert.equal(lines(dir).length, 1, 'nothing was appended');
+  r.reserve({ micro: 1 });
+});
+
+test('ledger operator errors: a live pid holding the lock past the maximum age refuses with the pid, the age and the command; under the maximum it waits', () => {
+  const dir = tdir(); const l = openLedger(dir, { lockTimeoutMs: 150, lockPollMs: 5, lockMaxAgeMs: 1000 });
+  const r = l.openRun(grant(), 'run-1');
+  const lock = join(realpathSync.native(dir), `${files(dir)[0]}.lock`);
+  mkdirSync(lock); writeFileSync(join(lock, 'owner.json'), JSON.stringify({ pid: process.pid, at_ms: Date.now() - 5000 }));
+  assert.throws(() => r.reserve({ micro: 1 }), (e) => e instanceof LedgerError && e.message.includes(lock) && e.message.includes(`pid ${process.pid}`) && /maximum/.test(e.message) && e.message.includes(`rm -r '${lock}'`));
+  assert.ok(existsSync(lock)); rmSync(lock, { recursive: true });
+  mkdirSync(lock); writeFileSync(join(lock, 'owner.json'), JSON.stringify({ pid: process.pid, at_ms: Date.now() }));
+  assert.throws(() => r.reserve({ micro: 1 }), /lock timeout on /); // young live lock: waits, then times out
+  assert.ok(existsSync(lock));
+});
+
+test('ledger operator errors: the clearing command quotes a path containing a single quote', () => {
+  const base = mkdtempSync(join(tmpdir(), "ledger-q'uote-")); const lock = join(base, 'x.lock'); mkdirSync(lock); writeFileSync(join(lock, 'owner.json'), '{');
+  assert.throws(() => acquireLock(lock, { timeoutMs: 50, pollMs: 5 }), (e) => e.message.includes(`rm -r '${base.replace(/'/g, `'\\''`)}/x.lock'`));
+});

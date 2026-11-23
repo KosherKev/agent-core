@@ -53,7 +53,7 @@ const RUN_ID = /^[A-Za-z0-9._:-]{1,100}$/;
 
 /**
  * Open (creating if needed) the local append-only grant ledger.
- * opts: { now, lockTimeoutMs, lockPollMs, pidAlive, io: { writeSync, fsyncSync } (injectable file operations), testHooks: { betweenCheckAndAppend() } }.
+ * opts: { now, lockTimeoutMs, lockMaxAgeMs, lockPollMs, pidAlive, io: { writeSync, fsyncSync } (injectable file operations), testHooks: { betweenCheckAndAppend() } }.
  * Every operation that writes holds an exclusive per-grant lock across read, check and append, and re-verifies the hash chain first.
  */
 export function openLedger(dir = defaultLedgerDir(), opts = {}) {
@@ -68,7 +68,7 @@ export function openLedger(dir = defaultLedgerDir(), opts = {}) {
   }
 }
 
-function build(dir, { now = Date.now, lockTimeoutMs = 5000, lockPollMs = 10, pidAlive, io = realIo, testHooks = {} } = {}) {
+function build(dir, { now = Date.now, lockTimeoutMs = 5000, lockMaxAgeMs = 300_000, lockPollMs = 10, pidAlive, io = realIo, testHooks = {} } = {}) {
   const fileOf = (key) => join(dir, fileNameFor(key));
   const readState = (file) => replay(existsSync(file) ? readFileSync(file, 'utf8') : '');
   const stamp = () => new Date(now()).toISOString();
@@ -86,7 +86,7 @@ function build(dir, { now = Date.now, lockTimeoutMs = 5000, lockPollMs = 10, pid
 
   /** Run fn(state) under the grant's exclusive lock. `fn` returns [entryFields | null, result]. */
   const locked = (file, fn) => {
-    const release = acquireLock(`${file}.lock`, { now, timeoutMs: lockTimeoutMs, pollMs: lockPollMs, io, ...(pidAlive ? { pidAlive } : {}) });
+    const release = acquireLock(`${file}.lock`, { now, timeoutMs: lockTimeoutMs, maxAgeMs: lockMaxAgeMs, pollMs: lockPollMs, io, ...(pidAlive ? { pidAlive } : {}) });
     try {
       const st = readState(file);
       const [entries, result] = fn(st);
