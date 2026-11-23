@@ -1,7 +1,8 @@
-import { mkdtempSync, writeFileSync, readFileSync, renameSync, rmSync } from 'node:fs';
+import { mkdtempSync, openSync, closeSync, readFileSync, renameSync, rmSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
-import { join } from 'node:path';
+import { join, dirname } from 'node:path';
 import { LedgerError } from './format.js';
+import { writeAll, fsyncDir, realIo } from './durable.js';
 
 const sleepSync = (ms) => { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms); };
 
@@ -25,21 +26,27 @@ const clearCommand = (lockPath) => `rm -r '${String(lockPath).replace(/'/g, `'\\
  * human; that is the restrictive choice.
  * Waits a bounded time for a live holder. Any timeout or error throws (refuse).
  */
-export function acquireLock(lockPath, { now = Date.now, timeoutMs = 5000, pollMs = 10, pidAlive = defaultPidAlive } = {}) {
+export function acquireLock(lockPath, { now = Date.now, timeoutMs = 5000, pollMs = 10, pidAlive = defaultPidAlive, io = realIo } = {}) {
   const deadline = Date.now() + timeoutMs;
   for (;;) {
     let tmp;
     try {
       tmp = mkdtempSync(`${lockPath}.t-`);
-      writeFileSync(join(tmp, 'owner.json'), JSON.stringify({ pid: process.pid, at_ms: now(), token: randomBytes(8).toString('hex') }), { mode: 0o600 });
+      const fd = openSync(join(tmp, 'owner.json'), 'wx', 0o600);
+      try { writeAll(fd, JSON.stringify({ pid: process.pid, at_ms: now(), token: randomBytes(8).toString('hex') }), io); io.fsyncSync(fd); } finally { closeSync(fd); }
+      fsyncDir(tmp, io); // the owner file's entry is durable before the lock can appear
       renameSync(tmp, lockPath);
+      tmp = undefined; // it is the lock now; the cleanup below must not touch it
       // Release by renaming away first (atomic), then deleting: deleting in place could remove a successor's fresh lock.
-      return () => {
+      const release = () => {
         const gone = `${lockPath}.rel-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
         try { renameSync(lockPath, gone); rmSync(gone, { recursive: true, force: true }); } catch { /* the lock stays; the next caller refuses with instructions */ }
       };
+      try { fsyncDir(dirname(lockPath), io); } catch (e) { release(); throw e; } // the lock's own entry is durable too
+      return release;
     } catch (err) {
       if (tmp) { try { rmSync(tmp, { recursive: true, force: true }); } catch { /* ignore */ } }
+      if (err instanceof LedgerError) throw err;
       if (!['EEXIST', 'ENOTEMPTY', 'EISDIR', 'ENOTDIR'].includes(err.code)) throw new LedgerError('ledger', `ledger lock error (${err.code ?? 'unknown'}); refusing`);
     }
     const owner = readOwner(lockPath);

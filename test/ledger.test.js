@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, readdirSync, statSync, existsSync, rmSync, utimesSync, realpathSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, readdirSync, statSync, existsSync, rmSync, utimesSync, realpathSync, writeSync, fsyncSync, fstatSync } from 'node:fs';
 import { execFileSync, spawn } from 'node:child_process';
 import { tmpdir, homedir } from 'node:os';
 import { join, dirname, resolve, sep } from 'node:path';
@@ -225,4 +225,50 @@ test('ledger: no API-key-shaped or unexpected free text can enter a line (only i
   assert.throws(() => r.endRun('sk-or-v1-FAKEKEY-for-tests-only-0123456789'));
   r.endRun('completed');
   assert.ok(!readFileSync(join(dir, files(dir)[0]), 'utf8').includes('sk-or'));
+});
+
+const real = { writeSync, fsyncSync };
+
+test('ledger durability: a short write is retried until every byte is written, and the line is intact', () => {
+  const dir = tdir(); let shorted = 0;
+  const io = { ...real, writeSync: (fd, buf, off, len) => { if (len > 10 && shorted < 3) { shorted += 1; return writeSync(fd, buf, off, 7); } return writeSync(fd, buf, off, len); } };
+  const l = openLedger(dir, { io }); const r = l.openRun(grant(), 'run-1'); r.settle(r.reserve({ micro: 5 }), 5);
+  assert.ok(shorted >= 3, 'the injected writer really did write short');
+  assert.equal(r.remaining().settled_micro, 5, 'the chain replays cleanly');
+  assert.ok(readFileSync(join(dir, files(dir)[0]), 'utf8').endsWith('\n'));
+});
+
+test('ledger durability: a write that makes no progress refuses with a clear error (never a silent partial append)', () => {
+  const dir = tdir(); let on = false;
+  const io = { ...real, writeSync: (fd, buf, off, len) => (on ? 0 : writeSync(fd, buf, off, len)) };
+  const l = openLedger(dir, { io }); const r = l.openRun(grant(), 'run-1');
+  on = true;
+  assert.throws(() => r.reserve({ micro: 1 }), (e) => e instanceof LedgerError && /short write|lock/.test(e.message));
+});
+
+test('ledger durability: an impossible write return value refuses', () => {
+  const dir = tdir(); let on = false;
+  const io = { ...real, writeSync: (fd, buf, off, len) => (on ? len + 5 : writeSync(fd, buf, off, len)) };
+  const l = openLedger(dir, { io }); const r = l.openRun(grant(), 'run-1'); on = true;
+  assert.throws(() => r.reserve({ micro: 1 }), LedgerError);
+});
+
+test('ledger durability: files are fsynced after every append, and directories after a new ledger file or a lock appears', () => {
+  const dir = tdir(); const calls = [];
+  const io = { ...real, fsyncSync: (fd) => { calls.push(fstatSync(fd).isDirectory() ? 'dir' : 'file'); return fsyncSync(fd); } };
+  const l = openLedger(dir, { io });
+  l.openRun(grant(), 'run-1'); // new ledger file: lock (file, tmp dir, parent dir) + ledger file + its directory
+  assert.deepEqual(calls, ['file', 'dir', 'dir', 'file', 'dir']);
+  calls.length = 0;
+  l.openRun(grant(), 'run-2'); // existing ledger file: lock (3) + ledger file only
+  assert.deepEqual(calls, ['file', 'dir', 'dir', 'file']);
+});
+
+test('ledger durability: a failing fsync refuses and does not leave the lock behind', () => {
+  const dir = tdir(); let fail = false;
+  const io = { ...real, fsyncSync: (fd) => { if (fail) { const e = new Error('x'); e.code = 'EIO'; throw e; } return fsyncSync(fd); } };
+  const l = openLedger(dir, { io }); const r = l.openRun(grant(), 'run-1'); fail = true;
+  assert.throws(() => r.reserve({ micro: 1 }), LedgerError);
+  fail = false;
+  r.reserve({ micro: 1 }); // lock was not left behind by the failed attempt
 });
