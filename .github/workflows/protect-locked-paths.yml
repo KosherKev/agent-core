@@ -8,15 +8,22 @@ jobs:
   locked-paths:
     runs-on: ubuntu-latest
     steps:
+      # Check out the BASE commit, so the guard script, locked-paths list and this check's
+      # logic all come from the base ref. A PR cannot change the rules it is judged by.
       - uses: actions/checkout@v4
         with:
+          ref: ${{ github.event.pull_request.base.sha }}
           fetch-depth: 0
-      - name: Fail if an agent-authored change touches locked paths
+          persist-credentials: false
+      - name: Fetch the PR head commit (data only, never executed)
         env:
-          HEAD_REF: ${{ github.head_ref }}
-          ACTOR: ${{ github.event.pull_request.user.login }}
-          AGENT_AUTHORED: ${{ contains(github.event.pull_request.labels.*.name, 'agent-authored') }}
-        run: node .github/scripts/locked-paths.mjs "${{ github.event.pull_request.base.sha }}" "${{ github.event.pull_request.head.sha }}"
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: git fetch --no-tags origin "+refs/pull/${PR_NUMBER}/head"
+      - name: Fail if the change touches any locked path
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: node .github/scripts/locked-paths.mjs "$BASE_SHA" "$HEAD_SHA"
   tests:
     runs-on: ubuntu-latest
     steps:
