@@ -8,7 +8,8 @@
     "build": "node scripts/build-self-model.js",
     "check:self-model": "node scripts/build-self-model.js --check",
     "test": "node --test \"test/**/*.test.js\" \"acceptance/**/*.test.js\"",
-    "builder:smoke": "node scripts/builder-smoke.js"
+    "builder:smoke": "node scripts/builder-smoke.js",
+    "ledger:report": "node src/ledger/report.js"
   },
   "engines": {
     "node": ">=20"
