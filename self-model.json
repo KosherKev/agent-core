@@ -59,6 +59,11 @@
       "name": "self-model",
       "version": "v1",
       "path": "schemas/v1/self-model.schema.json"
+    },
+    {
+      "name": "task-spec",
+      "version": "v1",
+      "path": "schemas/v1/task-spec.schema.json"
     }
   ],
   "adrs": [
@@ -86,6 +91,11 @@
       "id": "ADR-0005",
       "title": "Self-model contract",
       "path": "docs/adr/0005-self-model.md"
+    },
+    {
+      "id": "ADR-0006",
+      "title": "Task spec contract",
+      "path": "docs/adr/0006-task-spec.md"
     }
   ]
 }

@@ -1,0 +1,21 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "task-spec",
+  "title": "Task spec v1",
+  "description": "What a builder is asked to do: a goal, the repo it applies to, an optional branch, and the grant that bounds it (embedded or by reference).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "goal", "repo"],
+  "properties": {
+    "schema_version": { "const": "1" },
+    "goal": { "type": "string", "minLength": 1, "pattern": "\\S" },
+    "repo": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9.-]*\\.[A-Za-z]{2,}/[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9._-]+$", "description": "Repo identity as host/owner/name, for example github.com/KosherKev/agent-core." },
+    "branch": { "type": "string", "minLength": 1, "pattern": "\\S" },
+    "grant": { "$ref": "grant", "description": "The grant embedded in full." },
+    "grant_ref": { "type": "string", "minLength": 1, "description": "The task_id of a grant held elsewhere." }
+  },
+  "oneOf": [
+    { "required": ["grant"], "not": { "required": ["grant_ref"] } },
+    { "required": ["grant_ref"], "not": { "required": ["grant"] } }
+  ]
+}

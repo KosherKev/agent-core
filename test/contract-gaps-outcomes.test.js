@@ -1,7 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { validateJournalEntry } from '../src/validators.js';
-import { loadFixtures } from './helpers.js';
 
 const base = { schema_version: '1', id: 'j1', run_id: 'r1', at: '2026-11-23T05:00:00Z' };
 const issue = { ...base, kind: 'issue', category: 'bug', description: 'd', severity: 'low', suggested_fix: 'f' };
