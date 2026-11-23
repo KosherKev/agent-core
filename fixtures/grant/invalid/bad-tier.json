@@ -1,0 +1,1 @@
+{"schema_version":"1","task_id":"T","scope":{"repos":["a"],"paths":["p"]},"budget":{"max_usd":5,"max_tool_calls":2},"expires_at":"2026-12-01T00:00:00Z","allowed_risk_tiers":["root"]}
