@@ -60,15 +60,23 @@ export function acquireLock(lockPath, { now = Date.now, timeoutMs = 5000, pollMs
   const deadline = Date.now() + timeoutMs;
   for (;;) {
     let tmp;
+    const token = randomBytes(8).toString('hex');
     try {
       tmp = mkdtempSync(`${lockPath}.t-`);
       const fd = openSync(join(tmp, 'owner.json'), 'wx', 0o600);
-      try { writeAll(fd, JSON.stringify({ pid: process.pid, at_ms: now(), token: randomBytes(8).toString('hex') }), io); io.fsyncSync(fd); } finally { closeSync(fd); }
+      try { writeAll(fd, JSON.stringify({ pid: process.pid, at_ms: now(), token }), io); io.fsyncSync(fd); } finally { closeSync(fd); }
       fsyncDir(tmp, io); // the owner file's entry is durable before the lock can appear
       renameSync(tmp, lockPath);
       tmp = undefined; // it is the lock now; the cleanup below must not touch it
-      // Release by renaming away first (atomic), then deleting: deleting in place could remove a successor's fresh lock.
+      // Release: check the owner token is still ours, rename the lock directory away (atomic), then delete the renamed copy.
+      // PROTECTED: the delete can never hit a directory a successor creates at lockPath afterwards (it works on the renamed copy),
+      // and a lock that is no longer ours (cleared by hand and re-taken) is left alone because the token no longer matches.
+      // NOT PROTECTED: between the token check and the rename there is a window of microseconds in which a hand-cleared lock
+      // re-taken by someone else would be moved aside by mistake; and a crash before release leaves the lock in place (the next
+      // caller then refuses with instructions, it is never broken). Neither can happen without a manual clear or a crash.
       const release = () => {
+        const mine = inspectOwner(lockPath);
+        if (mine.kind !== 'ok' || mine.owner.token !== token) return;
         const gone = `${lockPath}.rel-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
         try { renameSync(lockPath, gone); rmSync(gone, { recursive: true, force: true }); } catch { /* the lock stays; the next caller refuses with instructions */ }
       };

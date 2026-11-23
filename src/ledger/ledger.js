@@ -3,7 +3,7 @@ import { homedir } from 'node:os';
 import { join, resolve, dirname, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { usdToMicro } from '../grant/money.js';
-import { LedgerError, GENESIS, canonicalJson, sha256, fileNameFor, replay, summarize } from './format.js';
+import { LedgerError, canonicalJson, sha256, fileNameFor, replay, summarize } from './format.js';
 import { acquireLock } from './lock.js';
 import { writeAll, fsyncDir, realIo } from './durable.js';
 
@@ -53,7 +53,7 @@ const RUN_ID = /^[A-Za-z0-9._:-]{1,100}$/;
 
 /**
  * Open (creating if needed) the local append-only grant ledger.
- * opts: { now, lockTimeoutMs, lockMaxAgeMs, lockPollMs, pidAlive, io: { writeSync, fsyncSync } (injectable file operations), testHooks: { betweenCheckAndAppend() } }.
+ * opts: { now, lockTimeoutMs, lockMaxAgeMs, lockPollMs, pidAlive, io: { writeSync, fsyncSync } (injectable file operations) }.
  * Every operation that writes holds an exclusive per-grant lock across read, check and append, and re-verifies the hash chain first.
  */
 export function openLedger(dir = defaultLedgerDir(), opts = {}) {
@@ -68,7 +68,7 @@ export function openLedger(dir = defaultLedgerDir(), opts = {}) {
   }
 }
 
-function build(dir, { now = Date.now, lockTimeoutMs = 5000, lockMaxAgeMs = 300_000, lockPollMs = 10, pidAlive, io = realIo, testHooks = {} } = {}) {
+function build(dir, { now = Date.now, lockTimeoutMs = 5000, lockMaxAgeMs = 300_000, lockPollMs = 10, pidAlive, io = realIo } = {}) {
   const fileOf = (key) => join(dir, fileNameFor(key));
   const readState = (file) => replay(existsSync(file) ? readFileSync(file, 'utf8') : '');
   const stamp = () => new Date(now()).toISOString();
@@ -91,7 +91,6 @@ function build(dir, { now = Date.now, lockTimeoutMs = 5000, lockMaxAgeMs = 300_0
       const st = readState(file);
       const [entries, result] = fn(st);
       let prev = st.last_hash; let seq = st.seq;
-      if (testHooks.betweenCheckAndAppend) testHooks.betweenCheckAndAppend();
       for (const body of entries ?? []) {
         seq += 1;
         const line = JSON.stringify({ v: 1, seq, at: stamp(), prev, ...body });
@@ -184,4 +183,3 @@ export function scanLedgerDir(dir) {
   }
   return out;
 }
-export { GENESIS };

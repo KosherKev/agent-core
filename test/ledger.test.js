@@ -325,3 +325,22 @@ test('ledger lock wait: the timeout is honoured even with a long poll interval, 
   assert.ok((cpu.user + cpu.system) / 1000 < elapsed * 0.6, 'the wait did not burn CPU');
   assert.equal(lines(dir).length, 1);
 });
+
+test('ledger lock cleanup: release leaves a lock that is no longer ours alone', () => {
+  const base = mkdtempSync(join(tmpdir(), 'ledger-rel-')); const lock = join(base, 'x.lock');
+  const release = acquireLock(lock, { timeoutMs: 50, pollMs: 5 });
+  rmSync(lock, { recursive: true }); // an operator clears it by hand ...
+  mkdirSync(lock); writeFileSync(join(lock, 'owner.json'), JSON.stringify({ pid: process.pid, at_ms: Date.now(), token: 'someone-else' })); // ... and another run takes it
+  release();
+  assert.ok(existsSync(lock), 'the successor lock was not removed');
+});
+
+test('ledger cleanup: no GENESIS re-export and no test hook in the production API', async () => {
+  const idx = await import('../src/ledger/index.js');
+  assert.equal('GENESIS' in idx, false);
+  for (const f of ['ledger.js', 'lock.js', 'durable.js', 'report.js', 'index.js']) {
+    const src = readFileSync(join(REPO, 'src/ledger', f), 'utf8');
+    assert.ok(!/testHooks|betweenCheckAndAppend/.test(src), `${f} has no test hook`);
+  }
+  assert.ok(!/export \{ GENESIS \}/.test(readFileSync(join(REPO, 'src/ledger/ledger.js'), 'utf8')));
+});
