@@ -5,7 +5,7 @@ import { mkdtempSync, mkdirSync, writeFileSync, renameSync, rmSync, symlinkSync,
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { parseLocked, isLocked, violations, parseNameZ } from '../.github/scripts/locked-paths.mjs';
+import { parseLocked, isLocked, violations, parseNameZ, foldSegment, isGitLikeSegment } from '../.github/scripts/locked-paths.mjs';
 
 const locked = parseLocked('# c\nacceptance/\n.github/\n');
 
@@ -233,4 +233,74 @@ test('guard fail-closed: git binary failing exits non-zero', () => {
     const r = runRaw(dir, [base, base], { PATH: bin + ':' + process.env.PATH });
     assert.notEqual(r.status, 0, r.stdout + r.stderr);
   } finally { rmSync(dir, { recursive: true, force: true }); rmSync(bin, { recursive: true, force: true }); }
+});
+
+// ---- Case, unicode and git-like names (guard folding fix) ----
+// The guard used to compare paths byte for byte. macOS and Windows disks do not, so `ACCEPTANCE/x` or
+// `.GitHub/x` is "a different path" to git and the same folder once checked out. These tests pin the fix.
+const foldLocked = parseLocked('acceptance/\n.github/\nsrc/validators.js\nstrasse/\n');
+const SHOULD_LOCK = [
+  'ACCEPTANCE/x.js', 'Acceptance/x.js', 'aCCePtAnCe/deep/er/x.js', '.GitHub/workflows/a.yml', '.GITHUB/CODEOWNERS',
+  'acceptance./x.js', 'acceptance /x.js', '.github../x',
+  'accep\u200btance/x.js', '\u00adacceptance/x.js', 'acceptance\u200e/x.js', '\ufeff.github/x',
+  'ACCEPTANCE\\x.js', '.github::$INDEX_ALLOCATION/x', 'acceptance:stream/x',
+  'SRC/VALIDATORS.JS', 'src/validator\u017f.js', 'STRA\u00dfE/x.js',
+  '.git/config', '.GIT/config', '.git /config', '.git./config', '.git~1/config', 'GIT~1/x', 'sub/.gitmodules', 'a/.GitAttributes',
+  'src/CODEOWNERS', 'docs/codeowners', 'CODEOWNERS', 'acceptance', '.github',
+];
+const SHOULD_NOT_LOCK = [
+  'acceptance-notes.md', 'src/acceptance.js', 'Accept/x.js', 'docs/github.md', '.gitignore', '.github-notes.md', '.githubx/x',
+  'my.git/x', 'legit.gitignore', 'src/free.js', 'src/validators.json', 'src/validator.js', 'strasse-notes.md',
+];
+const show = (p) => p.replace(/[^\x20-\x7e]/g, (c) => `\\u${c.charCodeAt(0).toString(16).padStart(4, '0')}`);
+for (const p of SHOULD_LOCK) test(`guard folding: ${show(p)} is locked`, () => assert.equal(isLocked(p, foldLocked), true));
+for (const p of SHOULD_NOT_LOCK) test(`guard folding: control - ${show(p)} is not locked`, () => assert.equal(isLocked(p, foldLocked), false));
+test('guard folding: foldSegment folds case, composition and invisible characters', () => {
+  assert.equal(foldSegment('ACCEPTANCE'), 'acceptance');
+  assert.equal(foldSegment('caf\u00e9'), foldSegment('cafe\u0301'));
+  assert.equal(foldSegment('a\u200bb'), 'ab');
+  assert.equal(foldSegment('\u017f'), 's');
+});
+test('guard folding: isGitLikeSegment', () => {
+  for (const s of ['.git', '.GIT', '.git ', '.git.', '.git~1', 'GIT~2', '.gitmodules', '.GitAttributes']) assert.equal(isGitLikeSegment(s), true, s);
+  for (const s of ['.gitignore', '.github', 'git', 'my.git', 'gitfile', '.gitx']) assert.equal(isGitLikeSegment(s), false, s);
+});
+
+// Real git repos, with the odd names written straight into the index: on a case-insensitive disk a file written to
+// ACCEPTANCE/x would land on acceptance/x, and `git add` would normalise the directory case. The index keeps the
+// byte-exact names a hostile commit can contain. (`.git` spellings cannot be written this way: git itself refuses them.)
+function scenarioIndex(entries) {
+  const { dir, base } = makeRepo();
+  try {
+    git(dir, 'config', 'core.ignorecase', 'false');
+    for (const [p, content] of entries) {
+      const sha = execFileSync('git', ['hash-object', '-w', '--stdin'], { cwd: dir, input: content, encoding: 'utf8' }).trim();
+      git(dir, 'update-index', '--add', '--cacheinfo', `100644,${sha},${p}`);
+    }
+    git(dir, 'commit', '-q', '-m', 'change');
+    return spawnSync('node', [GUARD, base, git(dir, 'rev-parse', 'HEAD')], { cwd: dir, encoding: 'utf8', env: process.env });
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+}
+test('guard CLI folding: a case variant of acceptance/ fails', () => {
+  const r = scenarioIndex([['ACCEPTANCE/check.test.js', 'attacker\n']]);
+  assert.equal(r.status, 1, r.stdout + r.stderr);
+  assert.match(r.stderr, /ACCEPTANCE\/check\.test\.js/);
+});
+test('guard CLI folding: a case variant of .github/ fails', () => {
+  const r = scenarioIndex([['.GitHub/workflows/evil.yml', 'name: evil\n']]);
+  assert.equal(r.status, 1, r.stdout + r.stderr);
+  assert.match(r.stderr, /\.GitHub\/workflows\/evil\.yml/);
+});
+test('guard CLI folding: mixed case and an invisible character both fail', () => {
+  const r = scenarioIndex([['Acceptance/new.test.js', 'x\n'], ['accep\u200btance/other.test.js', 'x\n']]);
+  assert.equal(r.status, 1, r.stdout + r.stderr);
+  assert.match(r.stderr, /Acceptance\/new\.test\.js/);
+});
+test('guard CLI folding: CODEOWNERS outside .github/ fails', () => {
+  const r = scenarioIndex([['docs/CODEOWNERS', '* @someone\n']]);
+  assert.equal(r.status, 1, r.stdout + r.stderr);
+});
+test('guard CLI folding: control - near-miss names pass', () => {
+  const r = scenarioIndex([['Accept/new.test.js', 'x\n'], ['acceptance-notes.md', 'x\n'], ['.gitignore', 'node_modules\n']]);
+  assert.equal(r.status, 0, r.stdout + r.stderr);
 });
