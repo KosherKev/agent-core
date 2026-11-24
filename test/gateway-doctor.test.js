@@ -379,3 +379,25 @@ test('round 2 low: the discovery file must not be group/world writable and its p
   assert.equal(byId(wrongPid, 'b').ok, false); assert.match(byId(wrongPid, 'b').why, /names pid/);
   noUndefined(writable); noUndefined(wrongPid);
 });
+
+test('round 4 item 3: a tool refusal in one check never leaks into another check\'s reason', async () => {
+  const s = setup();
+  // check A (the --gateway-user lookup) is refused but still resolves through a fallback; check (f) cannot inspect and reports no refusal of its own
+  const probes = deniedProbes(s, { resolveUser: (n, o) => { o?.onRefusal?.('id refused: /usr/bin/id: STALE-REASON'); return n === 'gwuser' ? GW : null; }, tcpListeners: async () => null });
+  const r = await asRunner(s, probes);
+  assert.equal(byId(r, 'f').ok, false); assert.match(byId(r, 'f').why, /cannot inspect/);
+  for (const c of r.checks) assert.doesNotMatch(c.why, /STALE-REASON/, c.id);
+  // a refusal reported by the lookup itself still shows in that check
+  const own = await asRunner(s, deniedProbes(s, { resolveUser: (n, o) => { o?.onRefusal?.('id refused: OWN-REASON'); return null; } }));
+  assert.match(byId(own, 'a').why, /OWN-REASON/);
+  // and by the listener probe in (f)
+  const listen = await run(s, healthy(s, { tcpListeners: async (i, o) => { o?.onRefusal?.('lsof refused: LSOF-REASON'); return null; } }));
+  assert.match(byId(listen, 'f').why, /LSOF-REASON/);
+  const after = await run(s, healthy(s, { tcpListeners: async () => null }));
+  assert.doesNotMatch(byId(after, 'f').why, /LSOF-REASON/);
+});
+
+test('round 4 item 3: tools.js keeps no module-level "last refusal" state', async () => {
+  const mod = await import('../src/gateway/tools.js');
+  assert.equal('lastToolRefusal' in mod, false);
+});

@@ -7,7 +7,7 @@ import { loadConfig } from './config.js';
 import { realStat } from './layout.js';
 import { resolveGroup, resolveUser, processInfo } from './sys.js';
 import { readDiscovery } from './discovery.js';
-import { runToolAsync } from './tools.js';
+import { runToolAsync, ToolError } from './tools.js';
 
 /** What one attempt at touching a protected path came to: 'denied' (the kernel said no), 'missing', 'allowed', or 'error:<code>'. */
 const verdictOf = (e) => (e?.code === 'EACCES' || e?.code === 'EPERM' ? 'denied' : e?.code === 'ENOENT' || e?.code === 'ENOTDIR' ? 'missing' : `error:${e?.code ?? 'unknown'}`);
@@ -46,7 +46,7 @@ const parseTcpTable = (text) => text.split('\n').slice(1).map((l) => l.trim().sp
  * (doctor runs as another user) fall back to every listening socket owned by the gateway uid, which is stricter, never looser.
  * Elsewhere: lsof, which only sees processes of the same user (or root); otherwise null.
  */
-function tcpListeners(info, { gatewayUid } = {}) {
+function tcpListeners(info, { gatewayUid, onRefusal } = {}) {
   if (!info) return null;
   if (existsSync('/proc/net/tcp')) {
     const tables = ['/proc/net/tcp', '/proc/net/tcp6'].filter((f) => existsSync(f)).map((f) => parseTcpTable(readFileSync(f, 'utf8')));
@@ -61,6 +61,7 @@ function tcpListeners(info, { gatewayUid } = {}) {
   const me = typeof process.getuid === 'function' ? process.getuid() : -1;
   if (me !== 0 && info.uid !== me) return null; // lsof would show nothing for another user's process; that is not "no listeners"
   return runToolAsync('lsof', ['-nP', '-a', '-p', String(info.pid), '-iTCP', '-sTCP:LISTEN', '-Fn']).then(({ err, out }) => {
+    if (err instanceof ToolError) onRefusal?.(err.message);
     if (err && err.code !== 1) return null; // lsof exits 1 when nothing matches; a refused tool or any other failure is "cannot tell" (doctor fails closed)
     return String(out).split('\n').filter((l) => l.startsWith('n'));
   });
