@@ -65,7 +65,11 @@ export function createGatewayApi({ config, store, runs, credentials, priceTable,
   // What a persisted record means for a retry. A finished call is answered from it; a started-but-unfinished one has an unknown outcome and is never re-run.
   const outcomeOf = (rec, fp) => {
     if (rec.fp !== fp) throw new RequestError('request_id_conflict', 'request_id was already used on this run with different parameters; refusing');
-    if (rec.pending) return { err: new RequestError('request_outcome_unknown', 'this request_id was started but its outcome was not recorded (the gateway stopped mid-call); its reservation is kept and the call is not repeated; use a new request_id to try again') };
+    if (rec.pending) {
+      // Say only what the run file shows: a reservation line, or none. Never claim a reservation that is not recorded.
+      const what = rec.reserved === true ? 'its reservation is kept' : 'the run file shows no reservation for it, so none is claimed here';
+      return { err: new RequestError('request_outcome_unknown', `this request_id was started but its outcome was not recorded (the gateway stopped mid-call); ${what}; the call is not repeated; use a new request_id to try again`) };
+    }
     if (rec.ok) return rec.result !== undefined ? { result: rec.result } : { err: new RequestError('request_result_unavailable', 'this request_id was already served but its result was not kept; refusing to pay twice') };
     return { err: new RequestError(typeof rec.code === 'string' ? rec.code : 'internal', typeof rec.message === 'string' ? rec.message : 'the recorded call failed') };
   };
@@ -75,6 +79,7 @@ export function createGatewayApi({ config, store, runs, credentials, priceTable,
 
   const callModel = async (r, p) => {
     const res = doReserve(r, { provider: p.provider, model: p.model, input: p.messages, max_tokens: p.max_tokens });
+    try { runs.recordRequestReserved(p.run_id, p.request_id, res.id); } catch { /* best effort: without the line a retry says no reservation is recorded, which is what the file then shows */ }
     let out;
     try { out = await callProvider({ config, credentials, provider: p.provider, model: p.model, messages: p.messages, maxTokens: res.max_tokens, send: transport, timeoutMs: config.provider_timeout_ms, maxBytes: config.max_response_bytes }); } catch (e) { r.reservations.delete(res.id); r.meter.release(res, 'proxy'); throw e; }
     r.reservations.delete(res.id);

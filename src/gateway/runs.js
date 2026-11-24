@@ -56,14 +56,16 @@ export function createRunStore(dir, { now = Date.now, fileSync = realFileSync } 
     recordRequestReserved(runId, requestId, reservationId) { write(runId, { type: 'request_reserved', request_id: requestId, ...(typeof reservationId === 'string' ? { reservation_id: reservationId.slice(0, 100) } : {}) }); },
     /**
      * The last recorded outcome for a request_id on this run (the durable fallback behind the gateway's bounded memory cache), or null. Throws if the file is unreadable.
-     * A finished call is its 'request' line. A call that was started but never finished comes back as its start line with `pending: true` (the outcome is unknown).
+     * A finished call is its 'request' line. A call that was started but never finished comes back as its start line with `pending: true` (the outcome is unknown) and `reserved: true` only if the file also holds a reservation line for it.
      */
     findRequest(runId, requestId) {
       const ls = lines(runId);
+      let reserved = false; // a reservation line newer than the start line that is found next
       for (let i = ls.length - 1; i >= 0; i -= 1) {
         if (ls[i].request_id !== requestId) continue;
         if (ls[i].type === 'request') return ls[i];
-        if (ls[i].type === 'request_start') return { ...ls[i], pending: true };
+        if (ls[i].type === 'request_reserved') reserved = true;
+        if (ls[i].type === 'request_start') return { ...ls[i], pending: true, reserved };
       }
       return null;
     },

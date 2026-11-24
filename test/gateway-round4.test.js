@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
+import { createHash } from 'node:crypto';
 import { tempHome, makeGrant, chatOk, FREE_MODEL } from './gateway-helpers.js';
 import { createFileLedgerStore } from '../src/gateway/store.js';
 import { createRunStore } from '../src/gateway/runs.js';
@@ -78,4 +79,40 @@ test('item 1: the directory is flushed only when the write created the run file'
   await runs.recordRequestStart('fresh', 'q2', 'fp'); // file exists now
   assert.deepEqual(calls, ['file']);
   assert.match(readFileSync(runFile(t, 'fresh'), 'utf8'), /"request_id":"q2"/);
+});
+
+// ---- item 2: request_outcome_unknown only claims a reservation the run file shows ----
+const fpOf = (p) => createHash('sha256').update(JSON.stringify([p.provider, p.model, p.messages, p.max_tokens ?? null])).digest('hex');
+
+test('item 2: start recorded with no reservation: the message does not claim one', async () => {
+  const t = tempHome();
+  const first = build(t);
+  await call(first.api, 'openRun', { run_id: 'r1', grant: makeGrant() });
+  await first.runs.recordRequestStart('r1', 'q1', fpOf({ ...req })); // a crash right after the start line, before anything was reserved
+  const second = build(t); // a restart over the same files
+  const r = await call(second.api, 'modelCall', { ...req, request_id: 'q1' });
+  assert.equal(r.ok, false); assert.equal(r.error.code, 'request_outcome_unknown');
+  assert.match(r.error.message, /no reservation/); assert.doesNotMatch(r.error.message, /reservation is kept/);
+  assert.equal(second.hits.length, 0);
+});
+
+test('item 2: start recorded with a reservation: the message says it is kept', async () => {
+  const t = tempHome();
+  const first = build(t);
+  await call(first.api, 'openRun', { run_id: 'r1', grant: makeGrant() });
+  await first.runs.recordRequestStart('r1', 'q1', fpOf({ ...req }));
+  first.runs.recordRequestReserved('r1', 'q1', 'res-1');
+  assert.equal(first.runs.findRequest('r1', 'q1').reserved, true);
+  const r = await call(build(t).api, 'modelCall', { ...req, request_id: 'q1' });
+  assert.equal(r.error.code, 'request_outcome_unknown'); assert.match(r.error.message, /its reservation is kept/);
+});
+
+test('item 2: a real call writes the reservation line between the start line and the outcome', async () => {
+  const t = tempHome();
+  const a = build(t);
+  await call(a.api, 'openRun', { run_id: 'r1', grant: makeGrant() });
+  assert.equal((await call(a.api, 'modelCall', { ...req, request_id: 'q1' })).ok, true);
+  const types = readFileSync(runFile(t), 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l).type);
+  assert.ok(types.indexOf('request_start') < types.indexOf('request_reserved') && types.indexOf('request_reserved') < types.indexOf('request'), types.join(','));
+  assert.equal(a.runs.findRequest('r1', 'q1').type, 'request');
 });
