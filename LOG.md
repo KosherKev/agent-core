@@ -1,5 +1,40 @@
 # LOG
 
+## 2026-11-24 (Gateway M1a fix round 2)
+Branch `task/gateway-m1a-fixes-2`, based on origin/main c23f7ed (PR #15). Works only in `src/gateway/`, `bin/agent` (unchanged), `docs/gateway.md`, README.md, `test/gateway-*.test.js`, LOG.md and `self-model.json`.
+
+### What was done, per item
+1. Doctor trust anchor. Doctor never takes identity from the environment: `AGENT_GATEWAY_SOCKET` is a location hint only. The gateway now writes `<socket_dir>/gateway.json` (0640, gateway uid, runner group; `src/gateway/discovery.js`, atomic write) holding socket path, a random `instance_id` per start, gateway uid and gid, pid; `ping` returns the same `instance_id`. When config.json is unreadable, doctor needs `--gateway-user <name>` (without it, check a fails with that instruction, b/c/d/f are skipped, and the socket is never contacted), resolves it to a uid (`resolveUser`: /etc/passwd, then `id -u`), and verifies: socket_dir, socket and gateway.json owned by that uid; socket_dir not writable by the doctor identity (a real create attempt); gateway.json names that uid and the hinted socket path; ping `instance_id` equals gateway.json's; the gateway's described uid and socket path match; doctor is not root or the gateway user. Any mismatch fails b, c, d and f with the reason named (and e follows). A readable-config run still behaves as before and prints a NOTE that it proves nothing about the runner boundary. `docs/gateway.md` says a doctor run by a compromised runner proves nothing and that the proof is the human running `--gateway-user`.
+2. Graceful shutdown. `server.js` keeps its own connection set; no `closeAllConnections`. `stop()`: stop accepting, destroy idle connections at once, let in-flight requests finish up to `shutdown_grace_ms` (config, default 10000, 0 to 600000; injectable `shutdownGraceMs`), then destroy the rest. `stop({ force: true })` (second signal) destroys at once. `agent gateway` handles SIGTERM, SIGINT and SIGHUP (first graceful, second forced) and an `exit` hook calling `cleanupSync()`. Pid file, socket and discovery file are removed on every path that can run code. Shutdown never settles or releases: a cut-off call keeps its reservation.
+3. Bounds. Request-id records are one global LRU (`request_cache_max`, default 1024, 1 to 1,000,000); only settled and persisted entries are evictable, in-flight ones never. Each finished call is persisted in the run file (fingerprint, outcome, redacted result or error) BEFORE the entry counts as settled; a memory miss falls back to `runs.findRequest`, so eviction cannot cause a second reservation or settlement (tests prove it for success and for failure). `request_read_timeout_ms` (default 10000, 1 to 3,600,000, injectable `readTimeoutMs`) runs from the first byte of a request line to its newline, never while a request is being served, separate from the idle timeout. `agent doctor --only` prints `PARTIAL: N of M checks run` (never "all checks passed"), exits non-zero unless all selected pass; `agent run` refuses a partial or failing doctor.
+
+### Interface gaps in locked code
+None hit. The structural test `test/grant-adapter.test.js` passed on the first run with no change to any file for it (discovery.js has no banned token; `node:net` only in server.js and client.js; no `fetchFn` added anywhere). No locked path touched.
+
+### Added dependencies
+None.
+
+### Deviations from the spec and judgement calls
+- Persisting the call result in the run file (needed so a retry after eviction "returns the persisted result") means model reply text is now stored in the run's `request` line (run files are 0600, gateway user only, and redacted). Previously only ids and costs were stored. Request messages are still never stored. Restrictive fallback: a persisted ok record without a result answers `request_result_unavailable` rather than calling the provider.
+- Persisted records without a fingerprint (written by round 1) are treated as a `request_id_conflict`, not replayed.
+- If persisting a record fails, that entry stays pinned in memory (never evicted); with a permanently failing disk the cache can exceed its cap. The in-memory result still dedupes.
+- `gateway_gid` in gateway.json is the gateway process's own gid; the file's group is the runner group.
+- `request_cache_max` is global across runs (not per run); closing a run drops its entries.
+- Trust checks run only when config.json is unreadable. If it is readable `--gateway-user` is ignored (the run proves nothing anyway and says so).
+- `dscl` was replaced by `id -u` for user lookup because an existing test forbids the host path text `/Users/` in `src/gateway`.
+- A restarted gateway does not reopen runs (round 1 behaviour), so after a real restart a retry gets `run_not_open`; "no double reserve" after restart is shown by reading the ledger from a fresh store, and the same-process retry test.
+- Commits: the per-issue split is by file group, not hunk; server.js, cli.js and api.js carry changes for more than one item.
+
+### What the tests cannot prove
+- The real OS boundary: real owners, groups, modes, a real second user, real impostor sockets owned by another uid. Doctor trust is tested with faked `stat`, `resolveUser`, `readDiscovery` and `tryCreate`; `resolveUser` itself and the real discovery file ownership (chown to another uid needs root) are not exercised against another user.
+- A real SIGTERM/SIGINT to a real `agent gateway` process: the signal handling is tested with a fake process object and the server `stop()` is tested directly.
+- Shutdown with a call held by a real provider over a slow network, kill -9 and power loss (stale files are replaced on next start by round 1 logic, untested here for the discovery file).
+- Memory growth under a persistently failing disk (see deviations).
+
+### Commands run and counts
+- Baseline on origin/main c23f7ed before changes: `npm test` Node 22.23.5: 587 tests, 587 pass, 0 fail. Node 24.22.3: 587 tests, 587 pass, 0 fail.
+- After the changes: `npm test` Node 22.23.5: 623 tests, 623 pass, 0 fail. Node 24.22.3: 623 tests, 623 pass, 0 fail (includes the structural test). `npm run check:self-model`: up to date. `npm audit --omit=dev`: 0 vulnerabilities. `builder:smoke` not run; no real key, no live network, no TCP listener.
+
 ## 2026-11-24 (Gateway M1a fix round)
 ### What was done
 Branch task/gateway-m1a-fixes off origin/main 8a47113 (merge of PR 13). One commit per issue. Only `src/gateway/`, `docs/gateway.md`, README.md, new/changed `test/gateway-*.test.js`, self-model.json and this file changed.
