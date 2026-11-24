@@ -28,6 +28,7 @@ One process, under a different OS identity from the runner, that holds the ledge
 | `request_read_timeout_ms` | 10000 | from the first byte of a request line to its newline; exceed it and the connection is destroyed. Separate from the idle timeout; never runs while a request is being served. |
 | `shutdown_grace_ms` | 10000 | how long in-flight requests may finish after SIGTERM, SIGINT or SIGHUP before the remaining connections are destroyed (0 destroys at once) |
 | `request_cache_max` | 1024 | in-memory request-id records across all runs (LRU for settled ones; in-flight ones are never evicted) |
+| `run_file_max_bytes` | 64 MiB | most a run file may be when the gateway re-reads it (a retry lookup, a duplicate journal id check, `journalRead`). A bigger file is refused with `run_file_too_large` and a readable message instead of being read in full; writes are not bounded by it. Integer from 1024 to 1 GiB. |
 
 ## API (JSON lines over the socket; one request in flight per connection)
 `ping`, `openRun`, `endRun`, `reserve`, `settle`, `release`, `modelCall`, `journalAppend`, `journalRead`. `pushBranch` and `requestMerge` return `not_implemented` ("not implemented in M1a").

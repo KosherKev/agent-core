@@ -4,7 +4,7 @@ import { validateGrant } from '../validators.js';
 import { priceKey } from './prices.js';
 import { callProvider, ProxyError } from './proxy.js';
 import { makeRedactor, redactDeep } from './credentials.js';
-import { OUTCOMES, DurabilityError } from './runs.js';
+import { OUTCOMES, DurabilityError, RunFileTooLarge } from './runs.js';
 import { createHash, randomBytes } from 'node:crypto';
 
 export const GATEWAY_VERSION = 'm1a.1';
@@ -146,7 +146,7 @@ export function createGatewayApi({ config, store, runs, credentials, priceTable,
       // A run that is not open here (it was ended, or the gateway restarted) can still have recorded requests. The persisted record is
       // consulted BEFORE the run-state check, so a retry gets its recorded answer and nothing can reserve a second time for a known request_id.
       if (!open.has(p.run_id) && paramsOk(p) && runs.exists(p.run_id)) {
-        let rec; try { rec = runs.findRequest(p.run_id, p.request_id); } catch { throw new RequestError('internal', 'cannot read the run record; refusing (fail closed)'); }
+        let rec; try { rec = runs.findRequest(p.run_id, p.request_id); } catch (e) { throw e instanceof RunFileTooLarge ? e : new RequestError('internal', 'cannot read the run record; refusing (fail closed)'); }
         if (rec) { const o = outcomeOf(rec, fpOf(p)); if (o.err) throw o.err; return { result: o.result }; }
       }
       const r = run(p.run_id);
@@ -160,7 +160,7 @@ export function createGatewayApi({ config, store, runs, credentials, priceTable,
       let seen = cache.get(key);
       if (!seen) {
         // Not in memory (never seen, or evicted): the run's persisted record decides. A record means the call already happened and must not be paid again.
-        let rec; try { rec = runs.findRequest(p.run_id, p.request_id); } catch { throw new RequestError('internal', 'cannot read the run record; refusing (fail closed)'); }
+        let rec; try { rec = runs.findRequest(p.run_id, p.request_id); } catch (e) { throw e instanceof RunFileTooLarge ? e : new RequestError('internal', 'cannot read the run record; refusing (fail closed)'); }
         if (rec) {
           const out = outcomeOf(rec, fp);
           if (rec.pending) throw out.err; // not cached: nothing here will ever finish it
@@ -220,6 +220,7 @@ export function createGatewayApi({ config, store, runs, credentials, priceTable,
 
   const errorOf = (err) => {
     if (err instanceof RequestError || err instanceof ProxyError) return { code: err.code, message: err.message };
+    if (err instanceof RunFileTooLarge) return { code: err.code, message: err.message };
     if (err instanceof GrantError) return { code: err.limit, message: err.message };
     if (err instanceof LedgerError) return { code: err.kind === 'budget' || err.kind === 'tool_calls' ? err.kind : 'ledger', message: err.message };
     if (err instanceof RangeError) return { code: 'invalid_request', message: String(err.message).slice(0, 300) };

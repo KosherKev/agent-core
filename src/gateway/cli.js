@@ -46,7 +46,7 @@ export async function startGateway({ home = agentHome(), getPeerUid, serverOpts 
   const { table, error } = loadGatewayPrices(priceFile);
   if (!table) throw new Error(`price table unusable: ${error}`);
   const store = createFileLedgerStore(config.ledger_dir, { now });
-  const runs = createRunStore(config.runs_dir, { now });
+  const runs = createRunStore(config.runs_dir, { now, maxBytes: config.run_file_max_bytes });
   const runnerGid = resolveGroup(config.runner_group);
   const access = getPeerUid ? 'kernel-permissions+peer-uid-probe' : 'kernel-permissions-only (no peer-uid probe configured)';
   const layoutInfo = () => ({ config_version: config.config_version, home: config.home, socket_dir: config.socket_dir, socket_path: config.socket_path, credentials_file: config.credentials_file, ledger_dir: config.ledger_dir, runs_dir: config.runs_dir, pid_file: config.pid_file, gateway_uid: config.identities.gateway_uid, runner_group: config.runner_group, runner_gid: runnerGid });

@@ -116,3 +116,37 @@ test('item 2: a real call writes the reservation line between the start line and
   assert.ok(types.indexOf('request_start') < types.indexOf('request_reserved') && types.indexOf('request_reserved') < types.indexOf('request'), types.join(','));
   assert.equal(a.runs.findRequest('r1', 'q1').type, 'request');
 });
+
+// ---- item 6c: the run-file re-read is bounded by run_file_max_bytes ----
+import { appendFileSync } from 'node:fs';
+import { validateConfig, LIMITS } from '../src/gateway/config.js';
+
+test('item 6c: run_file_max_bytes is a validated config limit with a default', () => {
+  const t = tempHome();
+  assert.equal(t.config.run_file_max_bytes, LIMITS.run_file_max_bytes[0]);
+  for (const bad of [0, 1023, -1, 1.5, '4096', 1024 * 1024 * 1024 + 1]) assert.equal(validateConfig({ ...t.raw, run_file_max_bytes: bad }, t.home).valid, false, String(bad));
+  const ok = validateConfig({ ...t.raw, run_file_max_bytes: 4096 }, t.home);
+  assert.equal(ok.valid, true); assert.equal(ok.config.run_file_max_bytes, 4096);
+});
+
+test('item 6c: a run file over the bound is refused with a readable error, not read; writes still work; under the bound everything is as before', async () => {
+  const t = tempHome();
+  const runs = createRunStore(t.config.runs_dir, { maxBytes: 2048 });
+  const a = build(t, { runsOpts: { maxBytes: 2048 } });
+  await call(a.api, 'openRun', { run_id: 'r1', grant: makeGrant() });
+  assert.equal((await call(a.api, 'modelCall', { ...req, request_id: 'q1' })).ok, true); // reads and writes under the bound
+  appendFileSync(runFile(t), JSON.stringify({ type: 'capability_added', name: 'x', pad: 'z'.repeat(4000) }) + '\n');
+  assert.throws(() => runs.findRequest('r1', 'q1'), (e) => e.code === 'run_file_too_large' && /run_file_max_bytes/.test(e.message));
+  assert.throws(() => runs.read('r1'), /run_file_max_bytes/);
+  const hits = a.hits.length;
+  const r = await call(a.api, 'modelCall', { ...req, request_id: 'q2' }); // a new request on an open run needs the re-read
+  assert.equal(r.ok, false); assert.equal(r.error.code, 'run_file_too_large'); assert.match(r.error.message, /refusing to read it/);
+  assert.equal(a.hits.length, hits, 'the provider was not called');
+  const restarted = await call(build(t, { runsOpts: { maxBytes: 2048 } }).api, 'modelCall', { ...req, request_id: 'q1' }); // the persisted-record path
+  assert.equal(restarted.error.code, 'run_file_too_large');
+  const jr = await call(a.api, 'journalRead', { run_id: 'r1' });
+  assert.equal(jr.ok, false); assert.equal(jr.error.code, 'run_file_too_large');
+  // the same file is fine under a larger bound
+  assert.equal(createRunStore(t.config.runs_dir, { maxBytes: 1024 * 1024 }).findRequest('r1', 'q1').type, 'request');
+  assert.throws(() => createRunStore(t.config.runs_dir, { maxBytes: 0 }), /positive integer/);
+});

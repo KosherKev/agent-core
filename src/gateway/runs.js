@@ -1,4 +1,4 @@
-import { mkdirSync, appendFileSync, readFileSync, existsSync, lstatSync, readdirSync, openSync, closeSync, writeSync, fsyncSync } from 'node:fs';
+import { mkdirSync, appendFileSync, readFileSync, existsSync, lstatSync, readdirSync, openSync, closeSync, writeSync, fsyncSync, fstatSync } from 'node:fs';
 import { join } from 'node:path';
 import { validateJournalEntry } from '../validators.js';
 
@@ -12,6 +12,10 @@ const CAP_EVENT = /^[a-z][a-z0-9]*(-[a-z0-9]+)*$/;
  * Those fields cannot live in the locked run-journal-entry schema (unevaluatedProperties:false, three kinds only), so they are
  * gateway lines of their own; ordinary journal entries are validated against that schema unchanged and stored as lines too.
  */
+/** A run file is larger than the configured re-read bound: it is refused, not read. Carries a readable message and the code `run_file_too_large`. */
+export class RunFileTooLarge extends Error { constructor(bytes, max) { super(`the run record is ${bytes} bytes, over run_file_max_bytes (${max}); refusing to read it (fail closed)`); this.name = 'RunFileTooLarge'; this.code = 'run_file_too_large'; } }
+export const DEFAULT_RUN_FILE_MAX_BYTES = 64 * 1024 * 1024;
+
 /** What the durable write of a request start does when the disk will not confirm it. The gateway turns it into `request_start_not_durable`. */
 export class DurabilityError extends Error { constructor(message) { super(message); this.name = 'DurabilityError'; } }
 
@@ -21,7 +25,8 @@ export const realFileSync = Object.freeze({
   dir: (path) => { const fd = openSync(path, 'r'); try { fsyncSync(fd); } finally { closeSync(fd); } },
 });
 
-export function createRunStore(dir, { now = Date.now, fileSync = realFileSync } = {}) {
+export function createRunStore(dir, { now = Date.now, fileSync = realFileSync, maxBytes = DEFAULT_RUN_FILE_MAX_BYTES } = {}) {
+  if (!Number.isSafeInteger(maxBytes) || maxBytes < 1) throw new RangeError('run_file_max_bytes must be a positive integer');
   mkdirSync(dir, { recursive: true, mode: 0o700 });
   const st = lstatSync(dir);
   if (st.isSymbolicLink() || !st.isDirectory()) throw new Error('runs directory is not a plain directory; refusing');
@@ -37,7 +42,17 @@ export function createRunStore(dir, { now = Date.now, fileSync = realFileSync } 
       try { await fileSync.file(fd); if (created) await fileSync.dir(dir); } catch { throw new DurabilityError('the run record could not be flushed to disk'); }
     } finally { closeSync(fd); }
   };
-  const lines = (runId) => { const f = fileOf(runId); return existsSync(f) ? readFileSync(f, 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l)) : []; };
+  // Every re-read of a run file (a retry lookup, a duplicate-id check, the assembled view) goes through here. The size is checked on the open file BEFORE anything is read.
+  const lines = (runId) => {
+    const f = fileOf(runId);
+    if (!existsSync(f)) return [];
+    const fd = openSync(f, 'r');
+    try {
+      const size = fstatSync(fd).size;
+      if (size > maxBytes) throw new RunFileTooLarge(size, maxBytes);
+      return readFileSync(fd, 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l));
+    } finally { closeSync(fd); }
+  };
 
   const api = {
     exists: (runId) => existsSync(fileOf(runId)),
