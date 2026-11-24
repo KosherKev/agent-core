@@ -456,3 +456,44 @@ test('round 4 item 6a: findSymlinkComponent walks every component with lstat; on
   assert.equal(findSymlinkComponent('/var/run/x', { lstat: mk(0), readlink: () => '/tmp/evil', platform: 'darwin' }).link, '/var');
   assert.deepEqual(Object.keys(SYSTEM_SYMLINKS), ['darwin']); assert.deepEqual(Object.keys(SYSTEM_SYMLINKS.darwin), ['/var', '/tmp', '/etc']);
 });
+
+// ---- round 4 item 6b: nothing is sent to the socket until the filesystem trust checks have passed ----
+test('round 4 item 6b: when a filesystem trust check fails, the socket receives no byte (not even a connection that writes); when they pass it gets exactly one ping', async () => {
+  const s = setup();
+  const sockPath = join(mkd(join(tmpdir(), 'gw-6b-')), 'gateway.sock');
+  // a real unix socket that records everything it is sent
+  let connections = 0; let bytes = 0;
+  const server = net.createServer((c) => { connections += 1; c.on('data', (d) => { bytes += d.length; c.write(JSON.stringify({ id: 1, ok: true, result: { version: 'm1a.1', uptime_ms: 5, pid: PID, instance_id: IID, layout: { ...s.layout, socket_path: sockPath, socket_dir: join(sockPath, '..') } } }) + '\n'); }); });
+  await new Promise((r) => server.listen(sockPath, r));
+  try {
+    const sockDir = join(sockPath, '..');
+    const real = realProbes({ pingTimeoutMs: 500 });
+    const tableFor = (patch = {}) => ({ [s.t.home]: { ok: true, type: 'dir', mode: 0o700, uid: GW, gid: 5 }, [sockDir]: { ok: true, type: 'dir', mode: 0o750, uid: GW, gid: GID }, [sockPath]: { ok: true, type: 'socket', mode: 0o660, uid: GW, gid: GID }, [join(sockDir, 'gateway.json')]: { ok: true, type: 'file', mode: 0o640, uid: GW, gid: GID }, ...patch });
+    const mk = (patch, o = {}) => { const tb = tableFor(patch); return { ...healthy(s), readConfig: () => ({ valid: false, errors: ['denied'], config: null, denied: true }), stat: (p) => tb[p] ?? { ok: false, code: 'ENOENT' }, readDiscovery: () => ({ ...healthy(s).disc, socket_path: sockPath }), ping: (p) => real.ping(p), ...o }; };
+    const failing = [
+      ['socket owned by someone else', mk({ [sockPath]: { ok: true, type: 'socket', mode: 0o660, uid: RUNNER, gid: GID } })],
+      ['socket_dir owned by someone else', mk({ [sockDir]: { ok: true, type: 'dir', mode: 0o750, uid: RUNNER, gid: GID } })],
+      ['discovery file missing', mk({}, { readDiscovery: () => null })],
+      ['discovery file group-writable', mk({ [join(sockDir, 'gateway.json')]: { ok: true, type: 'file', mode: 0o664, uid: GW, gid: GID } })],
+      ['a symlinked ancestor', mk({}, { symlinkComponent: (p) => (p === sockDir ? { ok: true, link: '/x/link', target: '/y' } : { ok: true, link: null }) })],
+      ['socket_dir writable by the doctor identity', mk({}, { tryCreate: () => 'allowed' })],
+      ['doctor runs as root', mk({}, { uid: () => 0 })],
+    ];
+    for (const [label, probes] of failing) {
+      const r = await runDoctor({ home: s.t.home, probes, socketPath: sockPath, gatewayUser: 'gwuser' });
+      for (const id of ['a', 'b', 'c', 'd', 'e', 'f']) assert.equal(byId(r, id).ok, false, `${label}: ${id}`);
+      assert.match(byId(r, 'b').why, /trust anchor failed/, label);
+      assert.equal(connections, 0, `${label}: the socket saw a connection`); assert.equal(bytes, 0, `${label}: the socket received bytes`);
+      noUndefined(r);
+    }
+    // all filesystem checks pass: exactly one ping goes out, then the post-ping checks decide
+    const okRun = await runDoctor({ home: s.t.home, probes: mk({}), socketPath: sockPath, gatewayUser: 'gwuser', only: ['a', 'b'] });
+    assert.equal(byId(okRun, 'b').ok, true, formatDoctor(okRun)); assert.equal(connections, 1); assert.ok(bytes > 0);
+  } finally { await new Promise((r) => server.close(r)); }
+});
+
+test('round 4 item 6b: a fake probe sees no ping call at all when the filesystem stage fails', async () => {
+  const s = setup(); let pings = 0;
+  const r = await asRunner(s, { ...withTable(s, { [s.cfg.socket_path]: { uid: RUNNER } }), readConfig: () => ({ valid: false, errors: ['denied'], config: null, denied: true }), ping: async () => { pings += 1; throw new Error('must not be called'); } });
+  assert.equal(pings, 0); assert.equal(byId(r, 'b').ok, false); assert.equal(r.ok, false);
+});
