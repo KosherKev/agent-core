@@ -112,6 +112,10 @@
       "path": "src/self-model.js"
     },
     {
+      "name": "task-spec",
+      "path": "src/task-spec.js"
+    },
+    {
       "name": "validators",
       "path": "src/validators.js"
     }
