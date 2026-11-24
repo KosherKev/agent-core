@@ -105,7 +105,9 @@ export async function runDoctor({ home = agentHome(), probes, priceFile = DEFAUL
     if (c.socket_dir !== dirname(hint)) why.push('the described socket_dir is not the directory of the socket asked for');
     owner(probes.stat(c.socket_dir), 'socket_dir'); owner(probes.stat(c.socket_path), 'the socket');
     const dFile = join(c.socket_dir, 'gateway.json');
-    owner(probes.stat(dFile), 'the discovery file (gateway.json)');
+    const dSt = probes.stat(dFile);
+    owner(dSt, 'the discovery file (gateway.json)');
+    if (dSt?.ok === true && isInt(dSt.mode) && (dSt.mode & 0o022) !== 0) why.push('the discovery file (gateway.json) is writable by group or others');
     const v = probes.tryCreate(c.socket_dir);
     if (v !== 'denied') why.push(`socket_dir is writable by this identity (${v === 'allowed' ? 'ALLOWED' : `not proven denied: ${v}`}), so anyone here could plant a socket`);
     let d = null; try { d = probes.readDiscovery(dFile); } catch { d = null; }
@@ -114,6 +116,7 @@ export async function runDoctor({ home = agentHome(), probes, priceFile = DEFAUL
       if (!isInt(d.gateway_uid)) why.push('the discovery file did not report gateway_uid');
       else if (d.gateway_uid !== anchorUid) why.push(`the discovery file names uid ${d.gateway_uid}, not the gateway uid ${anchorUid}`);
       if (d.socket_path !== hint) why.push('the discovery file names a different socket path');
+      if (pinged?.ok && Number.isSafeInteger(d.pid) && d.pid !== pinged.reply.pid) why.push(`the discovery file names pid ${d.pid} but the answering gateway reports pid ${pinged.reply.pid}`);
       const pi = pinged?.ok ? pinged.reply.instance_id : null;
       if (typeof pi !== 'string' || pi !== d.instance_id) why.push('the instance_id from ping does not match the discovery file (the answering process is not the one that wrote it)');
     }

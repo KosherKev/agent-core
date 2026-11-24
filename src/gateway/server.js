@@ -97,10 +97,11 @@ export function createGatewayServer({ api, config, getPeerUid, log = () => {}, c
   /** Synchronous and idempotent: safe to call from an 'exit' handler. Removes the pid file, the socket and the discovery file if they are ours. */
   const cleanupSync = () => {
     try { if (Number(readFileSync(config.pid_file, 'utf8').trim()) === process.pid) unlinkSync(config.pid_file); } catch { /* none, or not ours */ }
-    try { if (server.listening || ownsSocket) { if (lstatSync(config.socket_path).isSocket()) unlinkSync(config.socket_path); } } catch { /* already gone */ }
+    // only the socket this process created: a replacement bound by someone else at the same path (different inode) is left alone
+    try { if (server.listening || ownsSocket) { const ls = lstatSync(config.socket_path); if (ls.isSocket() && (socketIno === null || ls.ino === socketIno)) unlinkSync(config.socket_path); } } catch { /* already gone */ }
     removeDiscovery(dFile, instanceId);
   };
-  let ownsSocket = false;
+  let ownsSocket = false; let socketIno = null;
   const destroyAll = () => { for (const s of conns.keys()) s.destroy(); };
   let stopP = null; let finishStop = null;
 
@@ -129,6 +130,7 @@ export function createGatewayServer({ api, config, getPeerUid, log = () => {}, c
       const prev = process.umask(0o177); // created 0600 from the start; opened to the runner group only after the chown below
       try { await new Promise((res, rej) => { server.once('error', rej); server.listen(p, () => { server.off('error', rej); res(); }); }); } finally { process.umask(prev); }
       ownsSocket = true;
+      try { socketIno = lstatSync(p).ino; } catch { socketIno = null; }
       try {
         chownSync(p, config.identities.gateway_uid, gid);
         chmodSync(p, 0o660);

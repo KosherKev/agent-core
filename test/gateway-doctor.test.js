@@ -369,3 +369,13 @@ test('a failed trust anchor names check (e) properly (it used to print "FAIL (e)
   assert.equal(byId(r, 'e').ok, false); assert.equal(byId(r, 'e').name, 'peer-uid probe or kernel permissions only');
   noUndefined(r);
 });
+
+test('round 2 low: the discovery file must not be group/world writable and its pid must be the answering gateway\'s', async () => {
+  const s = setup();
+  const base = deniedProbes(s);
+  const writable = await asRunner(s, deniedProbes(s, { stat: (p) => (p.endsWith('gateway.json') ? { ...base.stat(p), mode: 0o664 } : base.stat(p)) }));
+  assert.equal(byId(writable, 'b').ok, false); assert.match(byId(writable, 'b').why, /discovery file \(gateway.json\) is writable/);
+  const wrongPid = await asRunner(s, deniedProbes(s, { readDiscovery: () => ({ ...base.disc, pid: PID + 1 }) }));
+  assert.equal(byId(wrongPid, 'b').ok, false); assert.match(byId(wrongPid, 'b').why, /names pid/);
+  noUndefined(writable); noUndefined(wrongPid);
+});
