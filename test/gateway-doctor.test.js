@@ -401,3 +401,17 @@ test('round 4 item 3: tools.js keeps no module-level "last refusal" state', asyn
   const mod = await import('../src/gateway/tools.js');
   assert.equal('lastToolRefusal' in mod, false);
 });
+
+test('round 4 item 5: the discovery file group must equal the configured runner group (match, mismatch, missing group config)', async () => {
+  const s = setup();
+  const dFile = join(s.cfg.socket_dir, 'gateway.json');
+  const ok = await asRunner(s, deniedProbes(s));
+  assert.equal(ok.ok, true, formatDoctor(ok));
+  const bad = await asRunner(s, { ...withTable(s, { [dFile]: { gid: GID + 1 } }), readConfig: () => ({ valid: false, errors: ['denied'], config: null, denied: true }) });
+  for (const id of ['b', 'c', 'd', 'f']) assert.equal(byId(bad, id).ok, false, id);
+  assert.match(byId(bad, 'b').why, new RegExp(`discovery file \\(gateway.json\\) is in group gid ${GID + 1}, not the configured runner group ${GID} \\(gid ${GID}\\)`));
+  // the group in config.json does not resolve and the gateway reports no gid: fail closed with a clear reason
+  const noGroup = await asRunner(s, deniedProbes(s, { resolveGroup: () => null, ping: async () => ({ ok: true, result: { version: 'm1a.1', uptime_ms: 1234, pid: PID, instance_id: IID, layout: { ...s.layout, runner_group: 'ghost', runner_gid: undefined } } }) }));
+  assert.equal(byId(noGroup, 'b').ok, false); assert.match(byId(noGroup, 'b').why, /runner group is not configured or does not resolve/);
+  noUndefined(bad); noUndefined(noGroup);
+});

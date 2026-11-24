@@ -108,6 +108,11 @@ export async function runDoctor({ home = agentHome(), probes, priceFile = DEFAUL
     const dSt = probes.stat(dFile);
     owner(dSt, 'the discovery file (gateway.json)');
     if (dSt?.ok === true && isInt(dSt.mode) && (dSt.mode & 0o022) !== 0) why.push('the discovery file (gateway.json) is writable by group or others');
+    if (dSt?.ok === true) { // the gateway hands the file to the runner group; any other group (or an unknown one) is not the file it wrote
+      if (gid === null || gid === undefined) why.push('the discovery file (gateway.json) group cannot be checked: the runner group is not configured or does not resolve to a gid (fail closed)');
+      else if (!isInt(dSt.gid)) why.push('the group of the discovery file (gateway.json) was not reported');
+      else if (dSt.gid !== gid) why.push(`the discovery file (gateway.json) is in group gid ${dSt.gid}, not the configured runner group ${one(c.runner_group).slice(0, 40)} (gid ${gid})`);
+    }
     const v = probes.tryCreate(c.socket_dir);
     if (v !== 'denied') why.push(`socket_dir is writable by this identity (${v === 'allowed' ? 'ALLOWED' : `not proven denied: ${v}`}), so anyone here could plant a socket`);
     let d = null; try { d = probes.readDiscovery(dFile); } catch { d = null; }
