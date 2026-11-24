@@ -192,11 +192,16 @@ test('structural: only callModel reaches the endpoint, only dispatchTool touches
   assert.ok(fn('callModel').includes('requestModel('));
   assert.ok(fn('callModel').includes('isMeter('));
   assert.ok(fn('requestModel').indexOf('meter.reserve(') < fn('requestModel').indexOf('fetchFn('), 'reserve before fetch');
-  // 2. No other source file can reach the network.
+  // 2. No other source file can reach the network, except the gateway files below, each only for the one token it needs:
+  //    the socket files may use node:net (the local unix socket); api, cli and proxy may name an injected fetchFn but import no network module.
+  const NET = /\bfetch\s*\(|fetchFn|node:https?|node:net|XMLHttpRequest|WebSocket/g;
+  const GATEWAY_ALLOWED = { 'gateway/server.js': ['node:net'], 'gateway/client.js': ['node:net'], 'gateway/api.js': ['fetchFn'], 'gateway/cli.js': ['fetchFn'], 'gateway/proxy.js': ['fetchFn'] };
   for (const f of readdirSync(join(REPO, 'src'), { recursive: true })) {
     if (!String(f).endsWith('.js') || f === 'builder-adapter.js') continue;
     const t = readFileSync(join(REPO, 'src', f), 'utf8');
-    assert.ok(!/\bfetch\s*\(|fetchFn|node:https?|node:net|XMLHttpRequest|WebSocket/.test(t), `${f} must not reach the network`);
+    const allowed = GATEWAY_ALLOWED[String(f)] ?? [];
+    const extra = [...new Set((t.match(NET) ?? []).map((m) => m.replace(/\s*\($/, '')))].filter((h) => !allowed.includes(h));
+    assert.deepEqual(extra, [], `${f} must not reach the network (allowed here: ${JSON.stringify(allowed)})`);
   }
   // 3. Tool side effects (reading and writing the worktree) happen only inside dispatchTool, after meter.checkTool().
   const d = fn('dispatchTool');
