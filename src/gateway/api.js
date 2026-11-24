@@ -62,6 +62,17 @@ export function createGatewayApi({ config, store, runs, credentials, priceTable,
     return res;
   };
 
+  // What a persisted record means for a retry. A finished call is answered from it; a started-but-unfinished one has an unknown outcome and is never re-run.
+  const outcomeOf = (rec, fp) => {
+    if (rec.fp !== fp) throw new RequestError('request_id_conflict', 'request_id was already used on this run with different parameters; refusing');
+    if (rec.pending) return { err: new RequestError('request_outcome_unknown', 'this request_id was started but its outcome was not recorded (the gateway stopped mid-call); its reservation is kept and the call is not repeated; use a new request_id to try again') };
+    if (rec.ok) return rec.result !== undefined ? { result: rec.result } : { err: new RequestError('request_result_unavailable', 'this request_id was already served but its result was not kept; refusing to pay twice') };
+    return { err: new RequestError(typeof rec.code === 'string' ? rec.code : 'internal', typeof rec.message === 'string' ? rec.message : 'the recorded call failed') };
+  };
+  const paramsOk = (p) => typeof p.run_id === 'string' && RUN_ID.test(p.run_id) && typeof p.request_id === 'string' && REQUEST_ID.test(p.request_id) && Array.isArray(p.messages) && p.messages.length >= 1 && p.messages.length <= MAX_MESSAGES && p.messages.every((m) => m && typeof m === 'object' && !Array.isArray(m) && typeof m.role === 'string') && typeof p.provider === 'string';
+  const fpOf = (p) => createHash('sha256').update(JSON.stringify([p.provider, p.model, p.messages, p.max_tokens ?? null])).digest('hex');
+  const pending = new Set(); // promises of detached modelCall work (the call and the persisting of its outcome)
+
   const callModel = async (r, p) => {
     const res = doReserve(r, { provider: p.provider, model: p.model, input: p.messages, max_tokens: p.max_tokens });
     let out;
@@ -127,21 +138,27 @@ export function createGatewayApi({ config, store, runs, credentials, priceTable,
       return { result: { cost_micro: 0 }, run: r };
     },
     async modelCall(p) {
+      // A run that is not open here (it was ended, or the gateway restarted) can still have recorded requests. The persisted record is
+      // consulted BEFORE the run-state check, so a retry gets its recorded answer and nothing can reserve a second time for a known request_id.
+      if (!open.has(p.run_id) && paramsOk(p) && runs.exists(p.run_id)) {
+        let rec; try { rec = runs.findRequest(p.run_id, p.request_id); } catch { throw new RequestError('internal', 'cannot read the run record; refusing (fail closed)'); }
+        if (rec) { const o = outcomeOf(rec, fpOf(p)); if (o.err) throw o.err; return { result: o.result }; }
+      }
       const r = run(p.run_id);
       if (typeof p.request_id !== 'string' || !REQUEST_ID.test(p.request_id)) throw bad('request_id is required (1 to 100 of A-Z a-z 0-9 . _ : -)');
       if (!Array.isArray(p.messages) || p.messages.length < 1 || p.messages.length > MAX_MESSAGES || !p.messages.every((m) => m && typeof m === 'object' && !Array.isArray(m) && typeof m.role === 'string')) throw bad('messages must be a non-empty array of { role, content }');
       checkProvider(p.provider);
       if (!credentials.get(p.provider)) throw new RequestError('credential', 'no credential for this provider; refusing');
       // One logical call per request_id on a run: a repeat never reserves or settles again. It gets the recorded outcome (or waits for the in-flight one).
-      const fp = createHash('sha256').update(JSON.stringify([p.provider, p.model, p.messages, p.max_tokens ?? null])).digest('hex');
+      const fp = fpOf(p);
       const key = ckey(p.run_id, p.request_id);
       let seen = cache.get(key);
       if (!seen) {
         // Not in memory (never seen, or evicted): the run's persisted record decides. A record means the call already happened and must not be paid again.
         let rec; try { rec = runs.findRequest(p.run_id, p.request_id); } catch { throw new RequestError('internal', 'cannot read the run record; refusing (fail closed)'); }
         if (rec) {
-          if (rec.fp !== fp) throw new RequestError('request_id_conflict', 'request_id was already used on this run with different parameters; refusing');
-          const out = rec.ok ? (rec.result !== undefined ? { result: rec.result } : { err: new RequestError('request_result_unavailable', 'this request_id was already served but its result was not kept; refusing to pay twice') }) : { err: new RequestError(typeof rec.code === 'string' ? rec.code : 'internal', typeof rec.message === 'string' ? rec.message : 'the recorded call failed') };
+          const out = outcomeOf(rec, fp);
+          if (rec.pending) throw out.err; // not cached: nothing here will ever finish it
           seen = { fp, done: Promise.resolve(out), settled: true };
           cache.set(key, seen); evict();
         }
@@ -159,16 +176,18 @@ export function createGatewayApi({ config, store, runs, credentials, priceTable,
       // The call runs to completion and settles even if the client has gone away; its outcome is persisted under the request_id before it counts as settled.
       entry.done = (async () => {
         let o;
-        try { o = { result: await callModel(r, p) }; } catch (err) { o = { err }; }
+        // The start line goes down BEFORE anything is reserved, so a call cut off by a stop is recognisable after a restart. If it cannot be written, nothing is reserved.
+        try { runs.recordRequestStart(p.run_id, p.request_id, fp); o = { result: await callModel(r, p) }; } catch (err) { o = { err }; }
         try {
           const e = o.err ? errorOf(o.err) : null;
           runs.recordRequest(p.run_id, p.request_id, { ok: !e, fp, ...(e ? { code: e.code, message: redact(e.message) } : { cost_micro: o.result.cost_micro, result: redactDeep(o.result, redact) }) });
           entry.settled = true;
-        } catch { /* not persisted: the entry stays pinned in memory, which is what dedupes */ }
+        } catch { log('request outcome could not be persisted; the entry stays pinned in memory'); }
         r.inflight -= 1;
         evict();
         return o;
       })();
+      pending.add(entry.done); entry.done.finally(() => pending.delete(entry.done)).catch(() => {});
       const o = await entry.done;
       if (o.err) throw o.err;
       return { result: o.result, run: r };
@@ -219,5 +238,5 @@ export function createGatewayApi({ config, store, runs, credentials, priceTable,
     }
   }
 
-  return Object.freeze({ handle, openRuns: () => [...open.keys()], instanceId, cacheSize: () => cache.size });
+  return Object.freeze({ handle, openRuns: () => [...open.keys()], instanceId, cacheSize: () => cache.size, /** Resolves once every detached modelCall has finished and persisted its outcome (used by shutdown). */ async drain() { while (pending.size) await Promise.allSettled([...pending]); } });
 }

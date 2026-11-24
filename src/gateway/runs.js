@@ -28,10 +28,19 @@ export function createRunStore(dir, { now = Date.now } = {}) {
     recordRequest(runId, requestId, { ok, code, cost_micro, fp, result, message } = {}) {
       write(runId, { type: 'request', request_id: requestId, ok: ok === true, ...(code ? { code: String(code).slice(0, 40) } : {}), ...(Number.isSafeInteger(cost_micro) ? { cost_micro } : {}), ...(typeof fp === 'string' ? { fp } : {}), ...(result !== undefined ? { result } : {}), ...(typeof message === 'string' ? { message: message.slice(0, 300) } : {}) });
     },
-    /** The last recorded outcome for a request_id on this run (the durable fallback behind the gateway's bounded memory cache), or null. Throws if the file is unreadable. */
+    /** Written BEFORE a modelCall reserves anything: proof that this request_id was started, so a cut-off call is recognisable after a restart. */
+    recordRequestStart(runId, requestId, fp) { write(runId, { type: 'request_start', request_id: requestId, fp }); },
+    /**
+     * The last recorded outcome for a request_id on this run (the durable fallback behind the gateway's bounded memory cache), or null. Throws if the file is unreadable.
+     * A finished call is its 'request' line. A call that was started but never finished comes back as its start line with `pending: true` (the outcome is unknown).
+     */
     findRequest(runId, requestId) {
       const ls = lines(runId);
-      for (let i = ls.length - 1; i >= 0; i -= 1) if (ls[i].type === 'request' && ls[i].request_id === requestId) return ls[i];
+      for (let i = ls.length - 1; i >= 0; i -= 1) {
+        if (ls[i].request_id !== requestId) continue;
+        if (ls[i].type === 'request') return ls[i];
+        if (ls[i].type === 'request_start') return { ...ls[i], pending: true };
+      }
       return null;
     },
     end(runId, outcome) {
