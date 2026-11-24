@@ -16,8 +16,8 @@ export function realStat(path) {
 const miss = (what, st) => ({ why: `${what} cannot be inspected (${st.code})`, fix: `check that ${what} exists and is reachable` });
 
 /** Each function returns an array of { why, fix }: empty means the item is exactly as required. */
-export function homeProblems(st, home, gatewayUid) {
-  if (!st.ok) return [miss('AGENT_HOME', st)];
+export function homeProblems(st, home, gatewayUid, { deniedOk = false } = {}) {
+  if (!st.ok) return deniedOk && (st.code === 'EACCES' || st.code === 'EPERM') ? [] : [miss('AGENT_HOME', st)];
   const out = [];
   if (st.type !== 'dir') out.push({ why: 'AGENT_HOME is not a plain directory', fix: `remove ${home} and run agent init as the gateway user` });
   if (st.uid !== gatewayUid) out.push({ why: `AGENT_HOME is owned by uid ${st.uid}, the gateway uid is ${gatewayUid}`, fix: `chown ${gatewayUid} ${home}  (run as root)` });

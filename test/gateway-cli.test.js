@@ -60,9 +60,11 @@ test('init creates the home and never overwrites; status and ledger:report work 
   assert.equal(await main(['ledger:report'], { env, io: rep.io }), EXIT.OK);
   assert.match(rep.out.join('\n'), /No grant ledgers found/);
   const st = cap();
-  assert.equal(await main(['status'], { env, io: st.io, deps: { connect: async () => false } }), EXIT.FAILED);
+  assert.equal(await main(['status'], { env, io: st.io, deps: { ping: async () => { throw new Error('down'); } } }), EXIT.FAILED);
   assert.match(st.out.join('\n'), /NOT reachable/);
-  assert.equal(await main(['status'], { env, io: cap().io, deps: { connect: async () => true } }), EXIT.OK);
+  const up = cap();
+  assert.equal(await main(['status'], { env, io: up.io, deps: { ping: async () => ({ ok: true, result: { version: 'm1a.1', uptime_ms: 5, access: 'kernel-permissions-only (no peer-uid probe configured)' } }) } }), EXIT.OK);
+  assert.match(up.out.join('\n'), /access:\s+kernel-permissions-only/);
 });
 
 test('commands that need a config fail closed without one', async () => {

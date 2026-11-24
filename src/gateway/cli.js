@@ -13,13 +13,14 @@ import { checkRealLayout } from './layout.js';
 import { loadGatewayPrices } from './prices.js';
 import { createSpendSink } from '../grant/index.js';
 import { buildReport } from '../ledger/index.js';
-import { canConnect } from './client.js';
+import { request } from './client.js';
 import { DEFAULT_PRICE_FILE } from '../grant/index.js';
 import { makeRedactor } from './credentials.js';
 
 export const USAGE = `usage: agent <command>
   init           create AGENT_HOME, config.json and directories (never overwrites)
-  doctor         run the boundary checks (exit 1 if any fails)
+  doctor         run the boundary checks as the runner user (exit 1 if any fails); --only a,b,f limits it
+                 set AGENT_GATEWAY_SOCKET=<socket_dir>/gateway.sock when config.json is unreadable by you
   status         show config, gateway reachability and ledger totals
   ledger:report  print the per-grant ledger report
   gateway        run the gateway (as the gateway user)
@@ -59,7 +60,8 @@ export async function startGateway({ home = agentHome(), getPeerUid, serverOpts 
 export async function main(argv, { env = process.env, io = { out: console.log, err: console.error }, deps = {} } = {}) {
   const [cmd] = argv;
   const home = agentHome(env);
-  const doctor = deps.doctor ?? (() => runDoctor({ home, probes: deps.probes ?? realProbes() }));
+  const doctorFor = (only) => (deps.doctor ?? (() => runDoctor({ home, probes: deps.probes ?? realProbes(), socketPath: env.AGENT_GATEWAY_SOCKET, only })))();
+  const doctor = () => doctorFor(undefined);
   try {
     switch (cmd) {
       case 'init': {
@@ -67,13 +69,20 @@ export async function main(argv, { env = process.env, io = { out: console.log, e
         r.made.forEach((p) => io.out(`created ${p}`)); r.kept.forEach((p) => io.out(`kept    ${p} (exists, not changed)`));
         return EXIT.OK;
       }
-      case 'doctor': { const r = await doctor(); io.out(formatDoctor(r)); return r.ok ? EXIT.OK : EXIT.FAILED; }
+      case 'doctor': {
+        const i = argv.indexOf('--only');
+        const only = i >= 0 ? String(argv[i + 1] ?? '').split(',').map((x) => x.trim()).filter(Boolean) : undefined;
+        if (i >= 0 && (!only.length || only.some((x) => !/^[a-h]$/.test(x)))) { io.err('agent doctor: --only takes a comma list of check ids a to h'); return EXIT.USAGE; }
+        const r = await doctorFor(only); io.out(formatDoctor(r)); return r.ok ? EXIT.OK : EXIT.FAILED;
+      }
       case 'status': {
         const loaded = loadConfig(home);
         if (!loaded.valid) { io.out(`config: INVALID (${loaded.errors[0]})`); return EXIT.FAILED; }
         const c = loaded.config;
-        const up = await (deps.connect ?? canConnect)(c.socket_path);
-        io.out(`home:    ${home}\nconfig:  valid (version ${c.config_version})\ngateway: ${up ? 'reachable' : 'NOT reachable'} (${c.socket_path})`);
+        let pong = null;
+        try { const r = await (deps.ping ?? ((sp) => request(sp, 'ping', {}, { timeoutMs: 3000 })))(c.socket_path); pong = r?.ok === true ? r.result : null; } catch { pong = null; }
+        const up = pong !== null;
+        io.out(`home:    ${home}\nconfig:  valid (version ${c.config_version})\ngateway: ${up ? `reachable, ${pong.version}, up ${pong.uptime_ms} ms` : 'NOT reachable'} (${c.socket_path})\naccess:  ${up ? pong.access : 'unknown (gateway not reachable)'}`);
         io.out(buildReport(c.ledger_dir).lines.join('\n'));
         return up ? EXIT.OK : EXIT.FAILED;
       }
