@@ -191,7 +191,7 @@ test('round 2 low: if the start line cannot be written nothing is reserved or se
     await call(a.api, 'openRun', { run_id: 'r1', grant: makeGrant() });
     chmodSync(runFile(tt), 0o400);
     const r = await call(a.api, 'modelCall', { ...paid, request_id: 'q1' });
-    assert.equal(r.ok, false); assert.equal(r.error.code, 'internal');
+    assert.equal(r.ok, false); assert.equal(r.error.code, 'request_start_not_durable');
     assert.equal(prov.hits.length, 0); assert.deepEqual(ledgerCounts(a.store.dir), { reserve: 0, settle: 0 });
     assert.ok(a.logs.some((l) => /could not be persisted/.test(l)), a.logs.join('|'));
     chmodSync(runFile(tt), 0o600);

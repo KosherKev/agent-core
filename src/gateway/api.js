@@ -4,7 +4,7 @@ import { validateGrant } from '../validators.js';
 import { priceKey } from './prices.js';
 import { callProvider, ProxyError } from './proxy.js';
 import { makeRedactor, redactDeep } from './credentials.js';
-import { OUTCOMES } from './runs.js';
+import { OUTCOMES, DurabilityError } from './runs.js';
 import { createHash, randomBytes } from 'node:crypto';
 
 export const GATEWAY_VERSION = 'm1a.1';
@@ -176,8 +176,12 @@ export function createGatewayApi({ config, store, runs, credentials, priceTable,
       // The call runs to completion and settles even if the client has gone away; its outcome is persisted under the request_id before it counts as settled.
       entry.done = (async () => {
         let o;
-        // The start line goes down BEFORE anything is reserved, so a call cut off by a stop is recognisable after a restart. If it cannot be written, nothing is reserved.
-        try { runs.recordRequestStart(p.run_id, p.request_id, fp); o = { result: await callModel(r, p) }; } catch (err) { o = { err }; }
+        // The start line goes down, flushed to disk, BEFORE anything is reserved or the provider is called, so a call cut off by a stop or a power loss is recognisable after a restart.
+        // If it cannot be written or flushed, nothing is reserved and the provider is never called (fail closed, with its own error code).
+        try {
+          try { await runs.recordRequestStart(p.run_id, p.request_id, fp); } catch (e) { throw new RequestError('request_start_not_durable', e instanceof DurabilityError ? 'the start of this request could not be made durable on disk; the provider was not called (fail closed); use a new request_id to try again' : 'the start of this request could not be recorded; the provider was not called (fail closed); use a new request_id to try again'); }
+          o = { result: await callModel(r, p) };
+        } catch (err) { o = { err }; }
         try {
           const e = o.err ? errorOf(o.err) : null;
           runs.recordRequest(p.run_id, p.request_id, { ok: !e, fp, ...(e ? { code: e.code, message: redact(e.message) } : { cost_micro: o.result.cost_micro, result: redactDeep(o.result, redact) }) });

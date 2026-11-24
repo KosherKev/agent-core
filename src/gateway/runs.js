@@ -1,4 +1,4 @@
-import { mkdirSync, appendFileSync, readFileSync, existsSync, lstatSync, readdirSync } from 'node:fs';
+import { mkdirSync, appendFileSync, readFileSync, existsSync, lstatSync, readdirSync, openSync, closeSync, writeSync, fsyncSync } from 'node:fs';
 import { join } from 'node:path';
 import { validateJournalEntry } from '../validators.js';
 
@@ -12,12 +12,31 @@ const CAP_EVENT = /^[a-z][a-z0-9]*(-[a-z0-9]+)*$/;
  * Those fields cannot live in the locked run-journal-entry schema (unevaluatedProperties:false, three kinds only), so they are
  * gateway lines of their own; ordinary journal entries are validated against that schema unchanged and stored as lines too.
  */
-export function createRunStore(dir, { now = Date.now } = {}) {
+/** What the durable write of a request start does when the disk will not confirm it. The gateway turns it into `request_start_not_durable`. */
+export class DurabilityError extends Error { constructor(message) { super(message); this.name = 'DurabilityError'; } }
+
+/** Default flush functions: fsync an open file descriptor, and fsync a directory (so a newly created file's name survives power loss). Injectable; may return a promise. */
+export const realFileSync = Object.freeze({
+  file: (fd) => fsyncSync(fd),
+  dir: (path) => { const fd = openSync(path, 'r'); try { fsyncSync(fd); } finally { closeSync(fd); } },
+});
+
+export function createRunStore(dir, { now = Date.now, fileSync = realFileSync } = {}) {
   mkdirSync(dir, { recursive: true, mode: 0o700 });
   const st = lstatSync(dir);
   if (st.isSymbolicLink() || !st.isDirectory()) throw new Error('runs directory is not a plain directory; refusing');
   const fileOf = (runId) => { if (typeof runId !== 'string' || !RUN_ID.test(runId)) throw new RangeError('run id is missing or malformed'); return join(dir, `${runId.replace(/:/g, '_')}.jsonl`); };
   const write = (runId, line) => appendFileSync(fileOf(runId), JSON.stringify({ at: new Date(now()).toISOString(), ...line }) + '\n', { flag: 'a', mode: 0o600 });
+  /** Append one line, then make it durable BEFORE returning: fsync the file, and the directory too when this write created the file. Rejects with DurabilityError if any flush fails. */
+  const writeDurable = async (runId, line) => {
+    const f = fileOf(runId);
+    const created = !existsSync(f);
+    const fd = openSync(f, 'a', 0o600);
+    try {
+      writeSync(fd, JSON.stringify({ at: new Date(now()).toISOString(), ...line }) + '\n');
+      try { await fileSync.file(fd); if (created) await fileSync.dir(dir); } catch { throw new DurabilityError('the run record could not be flushed to disk'); }
+    } finally { closeSync(fd); }
+  };
   const lines = (runId) => { const f = fileOf(runId); return existsSync(f) ? readFileSync(f, 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l)) : []; };
 
   const api = {
@@ -28,8 +47,13 @@ export function createRunStore(dir, { now = Date.now } = {}) {
     recordRequest(runId, requestId, { ok, code, cost_micro, fp, result, message } = {}) {
       write(runId, { type: 'request', request_id: requestId, ok: ok === true, ...(code ? { code: String(code).slice(0, 40) } : {}), ...(Number.isSafeInteger(cost_micro) ? { cost_micro } : {}), ...(typeof fp === 'string' ? { fp } : {}), ...(result !== undefined ? { result } : {}), ...(typeof message === 'string' ? { message: message.slice(0, 300) } : {}) });
     },
-    /** Written BEFORE a modelCall reserves anything: proof that this request_id was started, so a cut-off call is recognisable after a restart. */
-    recordRequestStart(runId, requestId, fp) { write(runId, { type: 'request_start', request_id: requestId, fp }); },
+    /**
+     * Written BEFORE a modelCall reserves anything or calls the provider: proof that this request_id was started, so a cut-off call is recognisable after a restart
+     * and nothing is paid twice. Async and durable: it resolves only after the line is flushed (file, and directory if this write created the file). Rejects with DurabilityError otherwise.
+     */
+    recordRequestStart(runId, requestId, fp) { return writeDurable(runId, { type: 'request_start', request_id: requestId, fp }); },
+    /** Best effort (not flushed): a reservation now exists for this request_id. Lets a retry say truthfully whether a reservation was recorded. */
+    recordRequestReserved(runId, requestId, reservationId) { write(runId, { type: 'request_reserved', request_id: requestId, ...(typeof reservationId === 'string' ? { reservation_id: reservationId.slice(0, 100) } : {}) }); },
     /**
      * The last recorded outcome for a request_id on this run (the durable fallback behind the gateway's bounded memory cache), or null. Throws if the file is unreadable.
      * A finished call is its 'request' line. A call that was started but never finished comes back as its start line with `pending: true` (the outcome is unknown).
