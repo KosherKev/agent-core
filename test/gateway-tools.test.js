@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { readFileSync, readdirSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { resolveTool, runToolSync, runToolAsync, TOOL_CANDIDATES, TOOL_ENV, ToolError, lastToolRefusal } from '../src/gateway/tools.js';
+import { resolveTool, runToolSync, runToolAsync, TOOL_CANDIDATES, TOOL_ENV, ToolError } from '../src/gateway/tools.js';
 import { resolveUser, processInfo } from '../src/gateway/sys.js';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..', 'src', 'gateway');
@@ -19,7 +19,6 @@ test('a candidate is used only if it is a regular file, owned by root and not gr
   assert.equal(resolveTool('id', { platform: 'darwin', statFn: only({}) }), '/usr/bin/id');
   for (const [o, why] of [[{ uid: 1000 }, /not owned by root/], [{ mode: 0o100775 }, /writable by group or others/], [{ mode: 0o100757 }, /writable by group or others/], [{ isFile: () => false }, /not a regular file/]]) {
     assert.throws(() => resolveTool('id', { platform: 'darwin', statFn: only(o) }), (e) => e instanceof ToolError && e.message.includes('/usr/bin/id') && why.test(e.message), String(why));
-    assert.match(lastToolRefusal(), /\/usr\/bin\/id/);
   }
   assert.throws(() => resolveTool('id', { platform: 'darwin', statFn: () => { const e = new Error('x'); e.code = 'ENOENT'; throw e; } }), /\/usr\/bin\/id: ENOENT/);
   assert.throws(() => resolveTool('dscl', { platform: 'linux' }), /no trusted location/);

@@ -4,7 +4,7 @@ import { validateGrant } from '../validators.js';
 import { priceKey } from './prices.js';
 import { callProvider, ProxyError } from './proxy.js';
 import { makeRedactor, redactDeep } from './credentials.js';
-import { OUTCOMES } from './runs.js';
+import { OUTCOMES, DurabilityError, RunFileTooLarge } from './runs.js';
 import { createHash, randomBytes } from 'node:crypto';
 
 export const GATEWAY_VERSION = 'm1a.1';
@@ -65,7 +65,11 @@ export function createGatewayApi({ config, store, runs, credentials, priceTable,
   // What a persisted record means for a retry. A finished call is answered from it; a started-but-unfinished one has an unknown outcome and is never re-run.
   const outcomeOf = (rec, fp) => {
     if (rec.fp !== fp) throw new RequestError('request_id_conflict', 'request_id was already used on this run with different parameters; refusing');
-    if (rec.pending) return { err: new RequestError('request_outcome_unknown', 'this request_id was started but its outcome was not recorded (the gateway stopped mid-call); its reservation is kept and the call is not repeated; use a new request_id to try again') };
+    if (rec.pending) {
+      // Say only what the run file shows: a reservation line, or none. Never claim a reservation that is not recorded.
+      const what = rec.reserved === true ? 'its reservation is kept' : 'the run file shows no reservation for it, so none is claimed here';
+      return { err: new RequestError('request_outcome_unknown', `this request_id was started but its outcome was not recorded (the gateway stopped mid-call); ${what}; the call is not repeated; use a new request_id to try again`) };
+    }
     if (rec.ok) return rec.result !== undefined ? { result: rec.result } : { err: new RequestError('request_result_unavailable', 'this request_id was already served but its result was not kept; refusing to pay twice') };
     return { err: new RequestError(typeof rec.code === 'string' ? rec.code : 'internal', typeof rec.message === 'string' ? rec.message : 'the recorded call failed') };
   };
@@ -75,6 +79,7 @@ export function createGatewayApi({ config, store, runs, credentials, priceTable,
 
   const callModel = async (r, p) => {
     const res = doReserve(r, { provider: p.provider, model: p.model, input: p.messages, max_tokens: p.max_tokens });
+    try { runs.recordRequestReserved(p.run_id, p.request_id, res.id); } catch { /* best effort: without the line a retry says no reservation is recorded, which is what the file then shows */ }
     let out;
     try { out = await callProvider({ config, credentials, provider: p.provider, model: p.model, messages: p.messages, maxTokens: res.max_tokens, send: transport, timeoutMs: config.provider_timeout_ms, maxBytes: config.max_response_bytes }); } catch (e) { r.reservations.delete(res.id); r.meter.release(res, 'proxy'); throw e; }
     r.reservations.delete(res.id);
@@ -141,7 +146,7 @@ export function createGatewayApi({ config, store, runs, credentials, priceTable,
       // A run that is not open here (it was ended, or the gateway restarted) can still have recorded requests. The persisted record is
       // consulted BEFORE the run-state check, so a retry gets its recorded answer and nothing can reserve a second time for a known request_id.
       if (!open.has(p.run_id) && paramsOk(p) && runs.exists(p.run_id)) {
-        let rec; try { rec = runs.findRequest(p.run_id, p.request_id); } catch { throw new RequestError('internal', 'cannot read the run record; refusing (fail closed)'); }
+        let rec; try { rec = runs.findRequest(p.run_id, p.request_id); } catch (e) { throw e instanceof RunFileTooLarge ? e : new RequestError('internal', 'cannot read the run record; refusing (fail closed)'); }
         if (rec) { const o = outcomeOf(rec, fpOf(p)); if (o.err) throw o.err; return { result: o.result }; }
       }
       const r = run(p.run_id);
@@ -155,7 +160,7 @@ export function createGatewayApi({ config, store, runs, credentials, priceTable,
       let seen = cache.get(key);
       if (!seen) {
         // Not in memory (never seen, or evicted): the run's persisted record decides. A record means the call already happened and must not be paid again.
-        let rec; try { rec = runs.findRequest(p.run_id, p.request_id); } catch { throw new RequestError('internal', 'cannot read the run record; refusing (fail closed)'); }
+        let rec; try { rec = runs.findRequest(p.run_id, p.request_id); } catch (e) { throw e instanceof RunFileTooLarge ? e : new RequestError('internal', 'cannot read the run record; refusing (fail closed)'); }
         if (rec) {
           const out = outcomeOf(rec, fp);
           if (rec.pending) throw out.err; // not cached: nothing here will ever finish it
@@ -176,8 +181,12 @@ export function createGatewayApi({ config, store, runs, credentials, priceTable,
       // The call runs to completion and settles even if the client has gone away; its outcome is persisted under the request_id before it counts as settled.
       entry.done = (async () => {
         let o;
-        // The start line goes down BEFORE anything is reserved, so a call cut off by a stop is recognisable after a restart. If it cannot be written, nothing is reserved.
-        try { runs.recordRequestStart(p.run_id, p.request_id, fp); o = { result: await callModel(r, p) }; } catch (err) { o = { err }; }
+        // The start line goes down, flushed to disk, BEFORE anything is reserved or the provider is called, so a call cut off by a stop or a power loss is recognisable after a restart.
+        // If it cannot be written or flushed, nothing is reserved and the provider is never called (fail closed, with its own error code).
+        try {
+          try { await runs.recordRequestStart(p.run_id, p.request_id, fp); } catch (e) { throw new RequestError('request_start_not_durable', e instanceof DurabilityError ? 'the start of this request could not be made durable on disk; the provider was not called (fail closed); use a new request_id to try again' : 'the start of this request could not be recorded; the provider was not called (fail closed); use a new request_id to try again'); }
+          o = { result: await callModel(r, p) };
+        } catch (err) { o = { err }; }
         try {
           const e = o.err ? errorOf(o.err) : null;
           runs.recordRequest(p.run_id, p.request_id, { ok: !e, fp, ...(e ? { code: e.code, message: redact(e.message) } : { cost_micro: o.result.cost_micro, result: redactDeep(o.result, redact) }) });
@@ -211,6 +220,7 @@ export function createGatewayApi({ config, store, runs, credentials, priceTable,
 
   const errorOf = (err) => {
     if (err instanceof RequestError || err instanceof ProxyError) return { code: err.code, message: err.message };
+    if (err instanceof RunFileTooLarge) return { code: err.code, message: err.message };
     if (err instanceof GrantError) return { code: err.limit, message: err.message };
     if (err instanceof LedgerError) return { code: err.kind === 'budget' || err.kind === 'tool_calls' ? err.kind : 'ledger', message: err.message };
     if (err instanceof RangeError) return { code: 'invalid_request', message: String(err.message).slice(0, 300) };

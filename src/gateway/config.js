@@ -14,7 +14,7 @@ export function agentHome(env = process.env) {
 export const configPath = (home) => join(home, 'config.json');
 
 const TOP_KEYS = ['config_version', 'socket_dir', 'socket_path', 'runner_group', 'ledger_dir', 'credentials_file', 'runs_dir', 'pid_file', 'identities', 'allowed_peer_uids', 'providers',
-  'provider_timeout_ms', 'idle_timeout_ms', 'max_response_bytes', 'max_request_bytes', 'max_connections', 'shutdown_grace_ms', 'request_read_timeout_ms', 'request_cache_max'];
+  'provider_timeout_ms', 'idle_timeout_ms', 'max_response_bytes', 'max_request_bytes', 'max_connections', 'shutdown_grace_ms', 'request_read_timeout_ms', 'request_cache_max', 'run_file_max_bytes'];
 /** Limits: [default, min, max]. All integers. */
 export const LIMITS = Object.freeze({
   provider_timeout_ms: [120_000, 1, 600_000],
@@ -25,6 +25,7 @@ export const LIMITS = Object.freeze({
   shutdown_grace_ms: [10_000, 0, 600_000],
   request_read_timeout_ms: [10_000, 1, 3_600_000],
   request_cache_max: [1024, 1, 1_000_000],
+  run_file_max_bytes: [64 * 1024 * 1024, 1024, 1024 * 1024 * 1024],
 });
 const GROUP_NAME = /^[A-Za-z_][A-Za-z0-9_.-]{0,31}$/;
 const inside = (child, parent) => child === parent || child.startsWith(parent.endsWith(sep) ? parent : parent + sep);

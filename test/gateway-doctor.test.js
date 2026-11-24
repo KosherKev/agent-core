@@ -40,6 +40,7 @@ function healthy(s, o = {}) {
     uid: () => RUNNER,
     readConfig: (h) => ({ valid: true, errors: [], config: cfg, home: h }),
     stat: (p) => table[p] ?? { ok: false, code: 'ENOENT' },
+    symlinkComponent: () => ({ ok: true, link: null }),
     resolveGroup: (g) => g,
     resolveUser: (n) => (n === 'gwuser' ? GW : null),
     readDiscovery: () => disc,
@@ -378,4 +379,121 @@ test('round 2 low: the discovery file must not be group/world writable and its p
   const wrongPid = await asRunner(s, deniedProbes(s, { readDiscovery: () => ({ ...base.disc, pid: PID + 1 }) }));
   assert.equal(byId(wrongPid, 'b').ok, false); assert.match(byId(wrongPid, 'b').why, /names pid/);
   noUndefined(writable); noUndefined(wrongPid);
+});
+
+test('round 4 item 3: a tool refusal in one check never leaks into another check\'s reason', async () => {
+  const s = setup();
+  // check A (the --gateway-user lookup) is refused but still resolves through a fallback; check (f) cannot inspect and reports no refusal of its own
+  const probes = deniedProbes(s, { resolveUser: (n, o) => { o?.onRefusal?.('id refused: /usr/bin/id: STALE-REASON'); return n === 'gwuser' ? GW : null; }, tcpListeners: async () => null });
+  const r = await asRunner(s, probes);
+  assert.equal(byId(r, 'f').ok, false); assert.match(byId(r, 'f').why, /cannot inspect/);
+  for (const c of r.checks) assert.doesNotMatch(c.why, /STALE-REASON/, c.id);
+  // a refusal reported by the lookup itself still shows in that check
+  const own = await asRunner(s, deniedProbes(s, { resolveUser: (n, o) => { o?.onRefusal?.('id refused: OWN-REASON'); return null; } }));
+  assert.match(byId(own, 'a').why, /OWN-REASON/);
+  // and by the listener probe in (f)
+  const listen = await run(s, healthy(s, { tcpListeners: async (i, o) => { o?.onRefusal?.('lsof refused: LSOF-REASON'); return null; } }));
+  assert.match(byId(listen, 'f').why, /LSOF-REASON/);
+  const after = await run(s, healthy(s, { tcpListeners: async () => null }));
+  assert.doesNotMatch(byId(after, 'f').why, /LSOF-REASON/);
+});
+
+test('round 4 item 3: tools.js keeps no module-level "last refusal" state', async () => {
+  const mod = await import('../src/gateway/tools.js');
+  assert.equal('lastToolRefusal' in mod, false);
+});
+
+test('round 4 item 5: the discovery file group must equal the configured runner group (match, mismatch, missing group config)', async () => {
+  const s = setup();
+  const dFile = join(s.cfg.socket_dir, 'gateway.json');
+  const ok = await asRunner(s, deniedProbes(s));
+  assert.equal(ok.ok, true, formatDoctor(ok));
+  const bad = await asRunner(s, { ...withTable(s, { [dFile]: { gid: GID + 1 } }), readConfig: () => ({ valid: false, errors: ['denied'], config: null, denied: true }) });
+  for (const id of ['b', 'c', 'd', 'f']) assert.equal(byId(bad, id).ok, false, id);
+  assert.match(byId(bad, 'b').why, new RegExp(`discovery file \\(gateway.json\\) is in group gid ${GID + 1}, not the configured runner group ${GID} \\(gid ${GID}\\)`));
+  // the group in config.json does not resolve and the gateway reports no gid: fail closed with a clear reason
+  const noGroup = await asRunner(s, deniedProbes(s, { resolveGroup: () => null, ping: async () => ({ ok: true, result: { version: 'm1a.1', uptime_ms: 1234, pid: PID, instance_id: IID, layout: { ...s.layout, runner_group: 'ghost', runner_gid: undefined } } }) }));
+  assert.equal(byId(noGroup, 'b').ok, false); assert.match(byId(noGroup, 'b').why, /runner group is not configured or does not resolve/);
+  noUndefined(bad); noUndefined(noGroup);
+});
+
+// ---- round 4 item 6a: symbolic links on the trust path ----
+import { findSymlinkComponent, SYSTEM_SYMLINKS } from '../src/gateway/layout.js';
+import { symlinkSync, mkdtempSync as mkd, realpathSync } from 'node:fs';
+
+test('round 4 item 6a: a symlinked ancestor of AGENT_HOME, socket_dir, the socket or the discovery file fails the trust anchor and names the component', async () => {
+  const s = setup();
+  const dFile = join(s.cfg.socket_dir, 'gateway.json');
+  const cases = [['AGENT_HOME', s.t.home], ['socket_dir', s.cfg.socket_dir], ['the socket', s.cfg.socket_path], ['the discovery file', dFile]];
+  for (const [what, path] of cases) {
+    const probes = deniedProbes(s, { symlinkComponent: (p) => (p === path ? { ok: true, link: '/srv/link', target: '/elsewhere' } : { ok: true, link: null }) });
+    const r = await asRunner(s, probes);
+    for (const id of ['b', 'c', 'd', 'f']) { assert.equal(byId(r, id).ok, false, `${what} ${id}`); assert.match(byId(r, id).why, /\/srv\/link on the path of/, `${what} ${id}`); }
+    assert.match(byId(r, 'b').why, /symbolic link \(to \/elsewhere\)/);
+  }
+  // not inspectable, or no probe at all: fail closed
+  const unknown = await asRunner(s, deniedProbes(s, { symlinkComponent: () => ({ ok: false, code: 'EACCES', at: '/x' }) }));
+  assert.match(byId(unknown, 'b').why, /cannot be checked for symbolic links \(EACCES at \/x\)/);
+  const { symlinkComponent: _drop, ...noProbe } = deniedProbes(s);
+  assert.match(byId(await asRunner(s, noProbe), 'b').why, /cannot be checked for symbolic links/);
+});
+
+test('round 4 item 6a: findSymlinkComponent walks every component with lstat; only the listed macOS root links are allowed', () => {
+  const dir = mkd(join(tmpdir(), 'gw-sym-')); const real = realpathSync(dir);
+  mkdirSync(join(real, 'a', 'b'), { recursive: true });
+  symlinkSync(join(real, 'a'), join(real, 'link'));
+  assert.deepEqual(findSymlinkComponent(join(real, 'a', 'b')), { ok: true, link: null });
+  const r = findSymlinkComponent(join(real, 'link', 'b'));
+  assert.equal(r.ok, true); assert.equal(r.link, join(real, 'link')); assert.equal(r.target, join(real, 'a'));
+  assert.equal(findSymlinkComponent(join(real, 'nope', 'x')).ok, false);
+  assert.equal(findSymlinkComponent('relative/path').ok, false);
+  // injected lstat: /var -> private/var is allowed only on darwin, only when root owns it and the target is exact
+  const mk = (uid) => (p) => ({ isSymbolicLink: () => p === '/var', uid });
+  const rl = () => 'private/var';
+  assert.deepEqual(findSymlinkComponent('/var/run/x', { lstat: mk(0), readlink: rl, platform: 'darwin' }), { ok: true, link: null });
+  assert.equal(findSymlinkComponent('/var/run/x', { lstat: mk(0), readlink: rl, platform: 'linux' }).link, '/var');
+  assert.equal(findSymlinkComponent('/var/run/x', { lstat: mk(501), readlink: rl, platform: 'darwin' }).link, '/var');
+  assert.equal(findSymlinkComponent('/var/run/x', { lstat: mk(0), readlink: () => '/tmp/evil', platform: 'darwin' }).link, '/var');
+  assert.deepEqual(Object.keys(SYSTEM_SYMLINKS), ['darwin']); assert.deepEqual(Object.keys(SYSTEM_SYMLINKS.darwin), ['/var', '/tmp', '/etc']);
+});
+
+// ---- round 4 item 6b: nothing is sent to the socket until the filesystem trust checks have passed ----
+test('round 4 item 6b: when a filesystem trust check fails, the socket receives no byte (not even a connection that writes); when they pass it gets exactly one ping', async () => {
+  const s = setup();
+  const sockPath = join(mkd(join(tmpdir(), 'gw-6b-')), 'gateway.sock');
+  // a real unix socket that records everything it is sent
+  let connections = 0; let bytes = 0;
+  const server = net.createServer((c) => { connections += 1; c.on('data', (d) => { bytes += d.length; c.write(JSON.stringify({ id: 1, ok: true, result: { version: 'm1a.1', uptime_ms: 5, pid: PID, instance_id: IID, layout: { ...s.layout, socket_path: sockPath, socket_dir: join(sockPath, '..') } } }) + '\n'); }); });
+  await new Promise((r) => server.listen(sockPath, r));
+  try {
+    const sockDir = join(sockPath, '..');
+    const real = realProbes({ pingTimeoutMs: 500 });
+    const tableFor = (patch = {}) => ({ [s.t.home]: { ok: true, type: 'dir', mode: 0o700, uid: GW, gid: 5 }, [sockDir]: { ok: true, type: 'dir', mode: 0o750, uid: GW, gid: GID }, [sockPath]: { ok: true, type: 'socket', mode: 0o660, uid: GW, gid: GID }, [join(sockDir, 'gateway.json')]: { ok: true, type: 'file', mode: 0o640, uid: GW, gid: GID }, ...patch });
+    const mk = (patch, o = {}) => { const tb = tableFor(patch); return { ...healthy(s), readConfig: () => ({ valid: false, errors: ['denied'], config: null, denied: true }), stat: (p) => tb[p] ?? { ok: false, code: 'ENOENT' }, readDiscovery: () => ({ ...healthy(s).disc, socket_path: sockPath }), ping: (p) => real.ping(p), ...o }; };
+    const failing = [
+      ['socket owned by someone else', mk({ [sockPath]: { ok: true, type: 'socket', mode: 0o660, uid: RUNNER, gid: GID } })],
+      ['socket_dir owned by someone else', mk({ [sockDir]: { ok: true, type: 'dir', mode: 0o750, uid: RUNNER, gid: GID } })],
+      ['discovery file missing', mk({}, { readDiscovery: () => null })],
+      ['discovery file group-writable', mk({ [join(sockDir, 'gateway.json')]: { ok: true, type: 'file', mode: 0o664, uid: GW, gid: GID } })],
+      ['a symlinked ancestor', mk({}, { symlinkComponent: (p) => (p === sockDir ? { ok: true, link: '/x/link', target: '/y' } : { ok: true, link: null }) })],
+      ['socket_dir writable by the doctor identity', mk({}, { tryCreate: () => 'allowed' })],
+      ['doctor runs as root', mk({}, { uid: () => 0 })],
+    ];
+    for (const [label, probes] of failing) {
+      const r = await runDoctor({ home: s.t.home, probes, socketPath: sockPath, gatewayUser: 'gwuser' });
+      for (const id of ['a', 'b', 'c', 'd', 'e', 'f']) assert.equal(byId(r, id).ok, false, `${label}: ${id}`);
+      assert.match(byId(r, 'b').why, /trust anchor failed/, label);
+      assert.equal(connections, 0, `${label}: the socket saw a connection`); assert.equal(bytes, 0, `${label}: the socket received bytes`);
+      noUndefined(r);
+    }
+    // all filesystem checks pass: exactly one ping goes out, then the post-ping checks decide
+    const okRun = await runDoctor({ home: s.t.home, probes: mk({}), socketPath: sockPath, gatewayUser: 'gwuser', only: ['a', 'b'] });
+    assert.equal(byId(okRun, 'b').ok, true, formatDoctor(okRun)); assert.equal(connections, 1); assert.ok(bytes > 0);
+  } finally { await new Promise((r) => server.close(r)); }
+});
+
+test('round 4 item 6b: a fake probe sees no ping call at all when the filesystem stage fails', async () => {
+  const s = setup(); let pings = 0;
+  const r = await asRunner(s, { ...withTable(s, { [s.cfg.socket_path]: { uid: RUNNER } }), readConfig: () => ({ valid: false, errors: ['denied'], config: null, denied: true }), ping: async () => { pings += 1; throw new Error('must not be called'); } });
+  assert.equal(pings, 0); assert.equal(byId(r, 'b').ok, false); assert.equal(r.ok, false);
 });

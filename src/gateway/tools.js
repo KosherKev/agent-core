@@ -16,14 +16,11 @@ export const TOOL_CANDIDATES = Object.freeze({
 export const TOOL_ENV = Object.freeze({ LC_ALL: 'C', LANG: 'C' });
 
 export class ToolError extends Error { constructor(message) { super(message); this.name = 'ToolError'; } }
-let lastRefusal = null;
-/** The most recent refusal reason (names the path), or null. For doctor to show why a lookup failed closed. */
-export const lastToolRefusal = () => lastRefusal;
 
 /** The absolute path of a trusted tool, or throws ToolError naming what was wrong with every candidate. */
 export function resolveTool(name, { platform = process.platform, statFn = statSync } = {}) {
   const list = TOOL_CANDIDATES[platform]?.[name];
-  if (!list) { lastRefusal = `no trusted location is known for ${name} on ${platform}`; throw new ToolError(lastRefusal); }
+  if (!list) throw new ToolError(`no trusted location is known for ${name} on ${platform}`);
   const why = [];
   for (const path of list) {
     let st;
@@ -31,11 +28,9 @@ export function resolveTool(name, { platform = process.platform, statFn = statSy
     if (!st.isFile()) { why.push(`${path}: not a regular file`); continue; }
     if (st.uid !== 0) { why.push(`${path}: not owned by root (uid ${st.uid})`); continue; }
     if ((st.mode & 0o022) !== 0) { why.push(`${path}: writable by group or others`); continue; }
-    lastRefusal = null;
     return path;
   }
-  lastRefusal = `${name} refused: ${why.join('; ')}`.slice(0, 300);
-  throw new ToolError(lastRefusal);
+  throw new ToolError(`${name} refused: ${why.join('; ')}`.slice(0, 300)); // the reason travels with the error; there is no shared "last refusal" state
 }
 
 const base = { env: TOOL_ENV, encoding: 'utf8', timeout: 5000 };

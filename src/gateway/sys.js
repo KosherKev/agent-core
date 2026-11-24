@@ -1,5 +1,5 @@
 import { readFileSync } from 'node:fs';
-import { runToolSync } from './tools.js';
+import { runToolSync, ToolError } from './tools.js';
 
 /**
  * Small OS lookups with no network: group name to gid, and what is running under a pid.
@@ -26,8 +26,8 @@ export function resolveGroup(group) {
   return null;
 }
 
-/** A user name to a uid, from /etc/passwd, then `id -u`. null when unknown (callers fail closed). */
-export function resolveUser(name) {
+/** A user name to a uid, from /etc/passwd, then `id -u`. null when unknown (callers fail closed). `onRefusal(reason)` is called, for this lookup only, if the trusted tool was refused. */
+export function resolveUser(name, { onRefusal } = {}) {
   if (typeof name !== 'string' || !/^[A-Za-z_][A-Za-z0-9_.-]{0,31}$/.test(name)) return null;
   try {
     for (const line of readFileSync('/etc/passwd', 'utf8').split('\n')) {
@@ -38,7 +38,7 @@ export function resolveUser(name) {
   try { // the system's own answer (covers directory-service users); `id -u` prints only the number
     const out = runToolSync('id', ['-u', name]).trim();
     if (/^\d+$/.test(out)) return Number(out);
-  } catch { /* unknown user */ }
+  } catch (e) { if (e instanceof ToolError) onRefusal?.(e.message); /* unknown user */ }
   return null;
 }
 

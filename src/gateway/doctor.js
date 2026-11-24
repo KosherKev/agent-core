@@ -4,7 +4,6 @@ import { loadGatewayPrices, checkPriceTable } from './prices.js';
 import { DEFAULT_PRICE_FILE } from '../grant/index.js';
 import { homeProblems, configFileProblems, socketDirProblems, socketProblems } from './layout.js';
 import { isGatewayCmdline } from './sys.js';
-import { lastToolRefusal } from './tools.js';
 
 const pass = (id, name, why) => ({ id, name, ok: true, why, fix: null });
 const fail = (id, name, why, fix) => ({ id, name, ok: false, why, fix });
@@ -50,35 +49,110 @@ export async function runDoctor({ home = agentHome(), probes, priceFile = DEFAUL
     return pinged;
   };
 
+  let gid = null;
+  const trustFix = 'do not trust this socket: as the real gateway user find what created it (ls -l the socket_dir), stop any impostor, restart the gateway, then re-run agent doctor --gateway-user <name>';
+  // ---- trust anchor stage 1: the filesystem only (no socket traffic) ----
+  let trustMemo = null; let fsWhy = null; let fsState = { dSt: null, d: null };
+  function fsTrust(c) {
+    if (fsWhy) return fsWhy;
+    const why = [];
+    const hint = resolve(socketPath);
+    const owner = (st, what) => {
+      if (!st || st.ok !== true) why.push(`${what} cannot be inspected (${known(st?.code) ?? 'no reason given'})`);
+      else if (!isInt(st.uid)) why.push(`the owner of ${what} was not reported`);
+      else if (st.uid !== anchorUid) why.push(`${what} is owned by uid ${st.uid}, not ${one(gatewayUser).slice(0, 40)} (uid ${anchorUid})`);
+    };
+    const me = probes.uid();
+    if (me === 0 || me === anchorUid) why.push(`doctor runs as uid ${me}, which cannot prove the boundary`);
+    owner(probes.stat(c.socket_dir), 'socket_dir'); owner(probes.stat(c.socket_path), 'the socket');
+    const dFile = join(c.socket_dir, 'gateway.json');
+    const dSt = probes.stat(dFile);
+    owner(dSt, 'the discovery file (gateway.json)');
+    if (dSt?.ok === true && isInt(dSt.mode) && (dSt.mode & 0o022) !== 0) why.push('the discovery file (gateway.json) is writable by group or others');
+    // No component from the filesystem root down to AGENT_HOME, socket_dir, the socket or the discovery file may be a symbolic link (lstat on each).
+    const seen = new Set();
+    for (const [what, p] of [['AGENT_HOME', home], ['socket_dir', c.socket_dir], ['the socket', c.socket_path], ['the discovery file (gateway.json)', dFile]]) {
+      let r = null; try { r = typeof probes.symlinkComponent === 'function' ? probes.symlinkComponent(p) : null; } catch { r = null; }
+      if (!r) why.push(`the path of ${what} cannot be checked for symbolic links (no probe answered; fail closed)`);
+      else if (r.ok !== true) why.push(`the path of ${what} cannot be checked for symbolic links (${known(r.code) ?? 'no reason given'} at ${one(r.at ?? 'unknown').slice(0, 80)})`);
+      else if (r.link && !seen.has(r.link)) { seen.add(r.link); why.push(`${one(r.link).slice(0, 80)} on the path of ${what} is a symbolic link${r.target ? ` (to ${one(r.target).slice(0, 60)})` : ''}`); }
+    }
+    const v = probes.tryCreate(c.socket_dir);
+    if (v !== 'denied') why.push(`socket_dir is writable by this identity (${v === 'allowed' ? 'ALLOWED' : `not proven denied: ${v}`}), so anyone here could plant a socket`);
+    let d = null; try { d = probes.readDiscovery(dFile); } catch { d = null; }
+    if (!d) why.push('the discovery file is missing, unreadable or malformed');
+    else {
+      if (!isInt(d.gateway_uid)) why.push('the discovery file did not report gateway_uid');
+      else if (d.gateway_uid !== anchorUid) why.push(`the discovery file names uid ${d.gateway_uid}, not the gateway uid ${anchorUid}`);
+      if (d.socket_path !== hint) why.push('the discovery file names a different socket path');
+    }
+    fsState = { dSt, d };
+    fsWhy = why;
+    return why;
+  }
+  // ---- stage 2: needs the ping answer ----
+  function pingTrust(c) {
+    const why = [];
+    if (pinged?.skipped) return why; // nothing was sent (the filesystem stage failed), so there is nothing to compare
+    const hint = resolve(socketPath);
+    const { dSt, d } = fsState;
+    if (c.socket_path !== hint) why.push('the gateway describes a socket path that is not the one asked for');
+    if (c.socket_dir !== dirname(hint)) why.push('the described socket_dir is not the directory of the socket asked for');
+    if (dSt?.ok === true) { // the gateway hands the file to the runner group; any other group (or an unknown one) is not the file it wrote
+      if (gid === null || gid === undefined) why.push('the discovery file (gateway.json) group cannot be checked: the runner group is not configured or does not resolve to a gid (fail closed)');
+      else if (!isInt(dSt.gid)) why.push('the group of the discovery file (gateway.json) was not reported');
+      else if (dSt.gid !== gid) why.push(`the discovery file (gateway.json) is in group gid ${dSt.gid}, not the configured runner group ${one(c.runner_group).slice(0, 40)} (gid ${gid})`);
+    }
+    if (d) {
+      if (pinged?.ok && Number.isSafeInteger(d.pid) && d.pid !== pinged.reply.pid) why.push(`the discovery file names pid ${d.pid} but the answering gateway reports pid ${pinged.reply.pid}`);
+      const pi = pinged?.ok ? pinged.reply.instance_id : null;
+      if (typeof pi !== 'string' || pi !== d.instance_id) why.push('the instance_id from ping does not match the discovery file (the answering process is not the one that wrote it)');
+    }
+    if (!pinged?.ok) why.push('the gateway did not answer a ping');
+    else if (!isInt(pinged.reply.layout?.gateway_uid)) why.push('the gateway did not report gateway_uid in its layout');
+    else if (pinged.reply.layout.gateway_uid !== anchorUid) why.push(`the gateway describes its own uid as ${pinged.reply.layout.gateway_uid}, not ${anchorUid}`);
+    return why;
+  }
+
   let loaded; try { loaded = probes.readConfig(home); } catch { loaded = { valid: false, errors: ['config probe error'] }; }
-  let cfg = loaded.valid ? loaded.config : null; let described = false; let aFail = null; let anchorUid = null;
+  let cfg = loaded.valid ? loaded.config : null; let described = false; let aFail = null; let anchorUid = null; let fsBlock = [];
   const notes = [];
   if (cfg) notes.push('config.json is readable by this identity, so this run is the gateway side looking at itself: it proves nothing about the runner boundary. The proof is a human running `agent doctor --gateway-user <name>` as the runner (docs/gateway.md).');
   if (!cfg) {
     if (loaded.denied && !gatewayUser) aFail = 'config.json is not readable by this user (expected for the runner), so the trust checks are refused: say who the gateway is with --gateway-user <name>';
     else if (loaded.denied && !socketPath) aFail = 'config.json is not readable by this user (expected for the runner) and AGENT_GATEWAY_SOCKET (the location hint) is not set';
     else if (loaded.denied) {
-      try { anchorUid = probes.resolveUser(gatewayUser); } catch { anchorUid = null; }
-      if (!isInt(anchorUid)) aFail = `--gateway-user ${one(gatewayUser).slice(0, 40)} does not resolve to a user on this machine${lastToolRefusal() ? ` (${lastToolRefusal()})` : ''}`;
+      let userRefusal = null; // the refusal reason of THIS lookup only, passed by value; nothing is shared between checks
+      try { anchorUid = probes.resolveUser(gatewayUser, { onRefusal: (m) => { userRefusal = m; } }); } catch { anchorUid = null; }
+      if (!isInt(anchorUid)) aFail = `--gateway-user ${one(gatewayUser).slice(0, 40)} does not resolve to a user on this machine${userRefusal ? ` (${userRefusal})` : ''}`;
       else {
-        const p = await ping(socketPath);
-        cfg = p.ok ? describedConfig(p.reply.layout, home) : null;
-        if (cfg) cfg = { ...cfg, identities: { gateway_uid: anchorUid } }; // the human-supplied identity, never the one the socket claims
-        described = !!cfg;
-        if (!cfg) aFail = p.ok ? 'config.json is not readable here and the gateway did not describe its layout' : `config.json is not readable here and the gateway did not answer (${p.why})`;
+        // The filesystem trust checks (owners, modes, symlinks, discovery file) run FIRST, from the paths the human gave. Only if they pass is a single ping sent;
+        // until then not one byte goes to the socket. (The layout, and so the runner group, can only come from that ping: the group check follows it.)
+        const hint0 = resolve(socketPath);
+        fsBlock = fsTrust({ socket_dir: dirname(hint0), socket_path: hint0 });
+        if (fsBlock.length) {
+          pinged = { ok: false, skipped: true, why: 'not attempted: the filesystem trust checks failed, so nothing was sent to the socket' };
+          cfg = { home, socket_dir: dirname(hint0), socket_path: hint0, credentials_file: '', ledger_dir: '', runs_dir: '', pid_file: '', runner_group: null, runner_gid: null, identities: { gateway_uid: anchorUid } };
+        } else {
+          const p = await ping(socketPath);
+          cfg = p.ok ? describedConfig(p.reply.layout, home) : null;
+          if (cfg) cfg = { ...cfg, identities: { gateway_uid: anchorUid } }; // the human-supplied identity, never the one the socket claims
+          described = !!cfg;
+          if (!cfg) aFail = p.ok ? 'config.json is not readable here and the gateway did not describe its layout' : `config.json is not readable here and the gateway did not answer (${p.why})`;
+        }
       }
     } else if (/\(ENOENT\)/.test(String(loaded.errors?.[0]))) aFail = `config.json is missing. If you are the runner, set AGENT_HOME to the gateway's AGENT_HOME. (${loaded.errors[0]})`;
     else aFail = loaded.errors[0];
   }
   const aFix = loaded.denied ? 'run `agent doctor --gateway-user <name>` with AGENT_GATEWAY_SOCKET=<socket_dir>/gateway.sock as a location hint (docs/gateway.md), and start the gateway' : 'run `agent init` to create a config, or fix config.json by hand (see docs/gateway.md); unknown keys and versions are refused';
   const gw = cfg?.identities.gateway_uid;
-  let gid = null;
   if (cfg) { try { gid = probes.resolveGroup(cfg.runner_group); } catch { gid = null; } if (gid === null || gid === undefined) gid = cfg.runner_gid ?? null; }
   const cfgFile = join(home, 'config.json');
 
   // (a) config valid, and the owners and modes of config.json, AGENT_HOME and socket_dir
   if (!cfg) checks.push(fail('a', 'config valid, owners and modes', one(aFail), aFix));
   else await safe('a', 'config valid, owners and modes', async () => {
+    if (fsBlock.length) return fail('a', 'config valid, owners and modes', one(`trust anchor failed: ${fsBlock.join('; ')}`), trustFix);
     const probs = [
       ...homeProblems(probes.stat(home), home, gw, { deniedOk: true }),
       ...configFileProblems(probes.stat(cfgFile), cfgFile, gw, { deniedOk: true }),
@@ -89,48 +163,17 @@ export async function runDoctor({ home = agentHome(), probes, priceFile = DEFAUL
   }, 'check ownership and modes of AGENT_HOME, config.json and socket_dir by hand (ls -ld)');
 
   // Trust anchor (only when config.json is unreadable): everything is checked against the human-supplied gateway user, never against the environment.
-  let trustMemo = null;
+  // Two stages. fsTrust needs no byte sent to the socket (owners, modes, symlinks, discovery file) and runs first. pingTrust compares what the answering
+  // process says with what the filesystem showed, so it can only run after a ping.
   const trust = (c) => {
     if (trustMemo) return trustMemo;
-    const why = [];
-    const hint = resolve(socketPath);
-    const owner = (st, what) => {
-      if (!st || st.ok !== true) why.push(`${what} cannot be inspected (${known(st?.code) ?? 'no reason given'})`);
-      else if (!isInt(st.uid)) why.push(`the owner of ${what} was not reported`);
-      else if (st.uid !== anchorUid) why.push(`${what} is owned by uid ${st.uid}, not ${one(gatewayUser).slice(0, 40)} (uid ${anchorUid})`);
-    };
-    const me = probes.uid();
-    if (me === 0 || me === anchorUid) why.push(`doctor runs as uid ${me}, which cannot prove the boundary`);
-    if (c.socket_path !== hint) why.push('the gateway describes a socket path that is not the one asked for');
-    if (c.socket_dir !== dirname(hint)) why.push('the described socket_dir is not the directory of the socket asked for');
-    owner(probes.stat(c.socket_dir), 'socket_dir'); owner(probes.stat(c.socket_path), 'the socket');
-    const dFile = join(c.socket_dir, 'gateway.json');
-    const dSt = probes.stat(dFile);
-    owner(dSt, 'the discovery file (gateway.json)');
-    if (dSt?.ok === true && isInt(dSt.mode) && (dSt.mode & 0o022) !== 0) why.push('the discovery file (gateway.json) is writable by group or others');
-    const v = probes.tryCreate(c.socket_dir);
-    if (v !== 'denied') why.push(`socket_dir is writable by this identity (${v === 'allowed' ? 'ALLOWED' : `not proven denied: ${v}`}), so anyone here could plant a socket`);
-    let d = null; try { d = probes.readDiscovery(dFile); } catch { d = null; }
-    if (!d) why.push('the discovery file is missing, unreadable or malformed');
-    else {
-      if (!isInt(d.gateway_uid)) why.push('the discovery file did not report gateway_uid');
-      else if (d.gateway_uid !== anchorUid) why.push(`the discovery file names uid ${d.gateway_uid}, not the gateway uid ${anchorUid}`);
-      if (d.socket_path !== hint) why.push('the discovery file names a different socket path');
-      if (pinged?.ok && Number.isSafeInteger(d.pid) && d.pid !== pinged.reply.pid) why.push(`the discovery file names pid ${d.pid} but the answering gateway reports pid ${pinged.reply.pid}`);
-      const pi = pinged?.ok ? pinged.reply.instance_id : null;
-      if (typeof pi !== 'string' || pi !== d.instance_id) why.push('the instance_id from ping does not match the discovery file (the answering process is not the one that wrote it)');
-    }
-    if (!pinged?.ok) why.push('the gateway did not answer a ping');
-    else if (!isInt(pinged.reply.layout?.gateway_uid)) why.push('the gateway did not report gateway_uid in its layout');
-    else if (pinged.reply.layout.gateway_uid !== anchorUid) why.push(`the gateway describes its own uid as ${pinged.reply.layout.gateway_uid}, not ${anchorUid}`);
-    trustMemo = why;
-    return why;
-  };
-  const trustFix = 'do not trust this socket: as the real gateway user find what created it (ls -l the socket_dir), stop any impostor, restart the gateway, then re-run agent doctor --gateway-user <name>';
+    trustMemo = [...fsTrust(c), ...pingTrust(c)];
+    return trustMemo;
+  }
   const needCfg = (id, name) => fail(id, name, 'skipped: config is not valid', 'fix check (a) first');
   // b, c, d and f rest on the gateway being who it says it is; without a human-supplied anchor they cannot pass, so each is refused if the anchor does not hold.
   const anchored = (id, fn) => async (c) => {
-    if (anchorUid !== null && !(id === 'b' && !pinged?.ok)) { const why = trust(c); if (why.length) return fail(id, CHECK_NAMES[id], one(`trust anchor failed: ${why.join('; ')}`), trustFix); }
+    if (anchorUid !== null && !(id === 'b' && !pinged?.ok && !pinged?.skipped)) { const why = trust(c); if (why.length) return fail(id, CHECK_NAMES[id], one(`trust anchor failed: ${why.join('; ')}`), trustFix); }
     return fn(c);
   };
   const withCfg = (id, name, fn, fixOnError) => (cfg ? safe(id, name, () => anchored(id, fn)(cfg), fixOnError) : checks.push(needCfg(id, name)));
@@ -193,8 +236,9 @@ export async function runDoctor({ home = agentHome(), probes, priceFile = DEFAUL
     if (!info) return fail('f', 'no TCP listener', `pid ${pid} is not running or cannot be inspected`, 'start the gateway as the gateway user');
     if (!isGatewayCmdline(info.cmdline)) return fail('f', 'no TCP listener', `pid ${pid} is not the gateway (its command line is not "agent gateway")`, 'stop whatever holds that pid and start the gateway with: agent gateway');
     if (Number.isSafeInteger(info.uid) && info.uid !== gw) return fail('f', 'no TCP listener', `pid ${pid} runs as uid ${info.uid}, not the gateway uid ${gw}`, 'start the gateway under the gateway user');
-    const l = await probes.tcpListeners(info, { gatewayUid: gw });
-    if (l === null || l === undefined) return fail('f', 'no TCP listener', `cannot inspect the gateway process\'s sockets as this user${lastToolRefusal() ? ` (${lastToolRefusal()})` : ''}`, 'on Linux read /proc needs no help; on macOS run only this check as root: sudo agent doctor --only f');
+    let listenRefusal = null; // this check's own refusal reason, by value
+    const l = await probes.tcpListeners(info, { gatewayUid: gw, onRefusal: (m) => { listenRefusal = m; } });
+    if (l === null || l === undefined) return fail('f', 'no TCP listener', `cannot inspect the gateway process\'s sockets as this user${listenRefusal ? ` (${listenRefusal})` : ''}`, 'on Linux read /proc needs no help; on macOS run only this check as root: sudo agent doctor --only f');
     if (l.length) return fail('f', 'no TCP listener', `gateway listens on TCP: ${l.join(', ').slice(0, 100)}`, 'stop the gateway; it must listen only on its Unix socket');
     return pass('f', 'no TCP listener', `verified pid ${pid} is the gateway; it has no TCP listening socket`);
   }, 'check listeners by hand (lsof -nP -iTCP -sTCP:LISTEN, or ss -ltnp)');
