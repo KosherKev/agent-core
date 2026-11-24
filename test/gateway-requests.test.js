@@ -2,8 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import net from 'node:net';
 import { createServer } from 'node:http';
-import { mkdtempSync, readdirSync, readFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tempHome, makeApi, makeGrant, chatOk, PAID_TABLE, FREE_MODEL } from './gateway-helpers.js';
 import { createGatewayServer } from '../src/gateway/server.js';
@@ -32,13 +31,11 @@ const until = async (f, ms = 3000) => { const t0 = Date.now(); while (!f()) { if
 
 async function setup({ priceTable, idleMs } = {}) {
   const prov = await slowProvider();
-  const t = tempHome({ baseUrl: prov.url, allowed: [4242] });
-  const dir = mkdtempSync(join(tmpdir(), 'gwr-'));
-  const config = { ...t.config, socket_path: join(dir, 's.sock'), pid_file: join(dir, 'pid') };
-  const a = makeApi({ ...t, config, priceTable });
-  const gw = createGatewayServer({ api: a.api, config, getPeerUid: () => 4242, idleMs, checkLayout: () => [] });
+  const t = tempHome({ baseUrl: prov.url });
+  const a = makeApi({ ...t, priceTable });
+  const gw = createGatewayServer({ api: a.api, config: t.config, idleMs }); // real layout check: the temp home is built exactly as required
   await gw.start();
-  return { prov, gw, sock: config.socket_path, ...a, close: async () => { await gw.stop(); await prov.close(); } };
+  return { prov, gw, sock: t.config.socket_path, ...a, close: async () => { await gw.stop(); await prov.close(); } };
 }
 const paid = { run_id: 'r1', provider: 'mockprov', model: 'paid/model', messages: msgs, max_tokens: 100 };
 

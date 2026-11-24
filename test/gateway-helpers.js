@@ -1,4 +1,4 @@
-import { mkdtempSync, writeFileSync, mkdirSync, readdirSync, readFileSync, statSync } from 'node:fs';
+import { mkdtempSync, writeFileSync, mkdirSync, readdirSync, readFileSync, statSync, chmodSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { loadConfig, defaultConfig } from '../src/gateway/config.js';
@@ -14,16 +14,18 @@ import { startMock, FAKE_KEY, makeGrant } from './builder-mock.js';
 export { startMock, FAKE_KEY, makeGrant };
 
 /** A fresh temp AGENT_HOME with a valid config pointing provider "mockprov" at `baseUrl`, and a 0600 credential file. */
-export function tempHome({ baseUrl = 'http://127.0.0.1:9/v1', allowed, withCredentials = true } = {}) {
+export function tempHome({ baseUrl = 'http://127.0.0.1:9/v1', allowed, withCredentials = true, limits = {} } = {}) {
   const home = mkdtempSync(join(tmpdir(), 'gw-home-'));
+  const socketDir = mkdtempSync(join(tmpdir(), 'gw-sock-'));
+  chmodSync(socketDir, 0o750); // the layout the gateway demands: group = the test process's own group, mode 750
   const uid = process.getuid();
-  const raw = defaultConfig({ gatewayUid: uid, runnerUid: uid });
+  const raw = { ...defaultConfig({ gatewayUid: uid, runnerUid: uid, socketDir, runnerGroup: process.getgid() }), ...limits };
   raw.providers = { mockprov: { base_url: baseUrl } };
   if (allowed) raw.allowed_peer_uids = allowed;
   writeFileSync(join(home, 'config.json'), JSON.stringify(raw), { mode: 0o600 });
   if (withCredentials) writeFileSync(join(home, 'credentials.json'), JSON.stringify({ providers: { mockprov: FAKE_KEY } }), { mode: 0o600 });
   mkdirSync(join(home, 'runs'), { recursive: true, mode: 0o700 });
-  return { home, raw, config: loadConfig(home).config };
+  return { home, raw, socketDir, config: loadConfig(home).config };
 }
 
 /** Build the gateway API against a temp home. `priceTable` defaults to the tracked (empty) config/prices.json. */
