@@ -84,6 +84,7 @@ export async function main(argv, { env = process.env, io = { out: console.log, e
       }
       case 'status': {
         const loaded = loadConfig(home);
+        if (!loaded.valid && loaded.denied) { io.out('config: not readable by this user (expected for the runner; the gateway user owns it). To check the boundary run: agent doctor --gateway-user <name>'); return EXIT.FAILED; }
         if (!loaded.valid) { io.out(`config: INVALID (${loaded.errors[0]})`); return EXIT.FAILED; }
         const c = loaded.config;
         let pong = null;
