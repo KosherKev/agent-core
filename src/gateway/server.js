@@ -1,7 +1,7 @@
 import net from 'node:net';
-import { existsSync, lstatSync, unlinkSync, chmodSync, chownSync, writeFileSync } from 'node:fs';
+import { existsSync, lstatSync, unlinkSync, chmodSync, chownSync, writeFileSync, readFileSync } from 'node:fs';
 import { checkRealLayout, realStat, socketProblems } from './layout.js';
-import { resolveGroup } from './sys.js';
+import { resolveGroup, processInfo, isGatewayCmdline } from './sys.js';
 
 export const MAX_LINE = 1024 * 1024;
 
@@ -23,7 +23,7 @@ export const unknownPeerUid = () => null;
  * No TCP listener exists in this module: it only ever calls listen(path). Before it listens it verifies the file-permission layout
  * and refuses to start if anything is wrong. With a peer-uid probe configured, the peer is checked BEFORE any byte is read.
  */
-export function createGatewayServer({ api, config, getPeerUid, log = () => {}, checkLayout = checkRealLayout, group = resolveGroup, statFn = realStat, idleMs = config.idle_timeout_ms ?? 30_000, maxRequestBytes = config.max_request_bytes ?? MAX_LINE }) {
+export function createGatewayServer({ api, config, getPeerUid, log = () => {}, checkLayout = checkRealLayout, group = resolveGroup, statFn = realStat, procInfo = processInfo, idleMs = config.idle_timeout_ms ?? 30_000, maxRequestBytes = config.max_request_bytes ?? MAX_LINE }) {
   const byteLen = (s) => Buffer.byteLength(s, 'utf8');
   const server = net.createServer({ allowHalfOpen: false, pauseOnConnect: true }, (socket) => {
     (async () => {
@@ -75,6 +75,12 @@ export function createGatewayServer({ api, config, getPeerUid, log = () => {}, c
       const gid = group(config.runner_group);
       const problems = await checkLayout(config, { gid });
       if (problems.length) throw new Error(`layout refused, not listening: ${problems.join('; ').slice(0, 400)}`);
+      // A pid file is a claim, not proof: it blocks startup only if that pid is alive AND is a gateway. A stale one is replaced below.
+      if (existsSync(config.pid_file)) {
+        let old = null; try { old = Number(readFileSync(config.pid_file, 'utf8').trim()); } catch { /* unreadable: treat as stale */ }
+        const info = Number.isSafeInteger(old) && old > 0 && old !== process.pid ? procInfo(old) : null;
+        if (info && isGatewayCmdline(info.cmdline)) throw new Error(`a gateway is already running (pid ${old}); refusing`);
+      }
       if (existsSync(p)) {
         if (!lstatSync(p).isSocket()) throw new Error('socket path exists and is not a socket; refusing');
         const live = await new Promise((res) => { const c = net.connect(p); c.once('connect', () => { c.destroy(); res(true); }); c.once('error', () => res(false)); });
@@ -96,6 +102,10 @@ export function createGatewayServer({ api, config, getPeerUid, log = () => {}, c
       writeFileSync(config.pid_file, `${process.pid}\n`, { mode: 0o600 });
       log('gateway listening on unix socket');
     },
-    stop: () => new Promise((res) => { server.close(() => res()); server.closeAllConnections?.(); }),
+    /** Stop listening, drop connections and remove the pid file (only if it still names this process). */
+    stop: () => new Promise((res) => {
+      try { if (Number(readFileSync(config.pid_file, 'utf8').trim()) === process.pid) unlinkSync(config.pid_file); } catch { /* none, or not ours */ }
+      server.close(() => res()); server.closeAllConnections?.();
+    }),
   });
 }

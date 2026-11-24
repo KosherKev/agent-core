@@ -103,7 +103,10 @@ export async function main(argv, { env = process.env, io = { out: console.log, e
       }
       case 'upgrade': io.err(`agent upgrade: ${NOT_IMPLEMENTED}`); return EXIT.NOT_IMPLEMENTED;
       case 'gateway': {
-        const { config } = await (deps.startGateway ?? startGateway)({ home, log: (l) => io.err(l) });
+        const { gw, config } = await (deps.startGateway ?? startGateway)({ home, log: (l) => io.err(l) });
+        const proc = deps.proc ?? process;
+        const down = async () => { try { await gw.stop(); } finally { proc.exit(0); } }; // clean shutdown removes the pid file and the socket
+        proc.once('SIGTERM', down); proc.once('SIGINT', down);
         io.out(`gateway running on ${config.socket_path} (uid ${typeof process.getuid === 'function' ? process.getuid() : '?'}); Ctrl-C to stop`);
         return null; // keeps running; the server holds the process open
       }
