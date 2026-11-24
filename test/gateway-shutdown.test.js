@@ -284,3 +284,16 @@ test('no secret appears in any response, log or run file across eviction, shutdo
     for (const text of [JSON.stringify(outs), logs.join('\n'), ...files]) assert.ok(!text.includes('FAKEKEY') && !/sk-/.test(text));
   } finally { await prov.close(); }
 });
+
+test('round 2 low: cleanupSync does not unlink a socket that is not the one this process created (different inode)', async () => {
+  const s = await setup();
+  const { unlinkSync } = await import('node:fs');
+  let other;
+  try {
+    unlinkSync(s.config.socket_path); // someone replaced our socket with their own
+    other = net.createServer(); await new Promise((r) => other.listen(s.config.socket_path, r));
+    s.gw.cleanupSync();
+    assert.equal(existsSync(s.config.socket_path), true, 'the other process\'s socket was left alone');
+    assert.equal(existsSync(s.config.pid_file), false, 'our own pid file is still removed');
+  } finally { if (other) await new Promise((r) => other.close(r)); await s.close(); }
+});

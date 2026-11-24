@@ -4,12 +4,14 @@ import { loadGatewayPrices, checkPriceTable } from './prices.js';
 import { DEFAULT_PRICE_FILE } from '../grant/index.js';
 import { homeProblems, configFileProblems, socketDirProblems, socketProblems } from './layout.js';
 import { isGatewayCmdline } from './sys.js';
+import { lastToolRefusal } from './tools.js';
 
 const pass = (id, name, why) => ({ id, name, ok: true, why, fix: null });
 const fail = (id, name, why, fix) => ({ id, name, ok: false, why, fix });
-const CHECK_NAMES = { b: 'gateway answers ping', c: 'socket owner, group and mode', d: 'boundary probes denied', f: 'no TCP listener' };
+const CHECK_NAMES = { b: 'gateway answers ping', c: 'socket owner, group and mode', d: 'boundary probes denied', e: 'peer-uid probe or kernel permissions only', f: 'no TCP listener' };
 const one = (s) => String(s).replace(/\s+/g, ' ').slice(0, 220);
 const isInt = (n) => Number.isSafeInteger(n) && n >= 0;
+const known = (v) => (v === undefined || v === null ? null : String(v));
 const isStr = (s) => typeof s === 'string' && s.length > 0 && s.length < 1024;
 
 /** A reply to `ping` is well formed only if it is ok:true with a version, an uptime and a pid. A refused or silent server never gets this far. */
@@ -57,7 +59,7 @@ export async function runDoctor({ home = agentHome(), probes, priceFile = DEFAUL
     else if (loaded.denied && !socketPath) aFail = 'config.json is not readable by this user (expected for the runner) and AGENT_GATEWAY_SOCKET (the location hint) is not set';
     else if (loaded.denied) {
       try { anchorUid = probes.resolveUser(gatewayUser); } catch { anchorUid = null; }
-      if (!isInt(anchorUid)) aFail = `--gateway-user ${one(gatewayUser).slice(0, 40)} does not resolve to a user on this machine`;
+      if (!isInt(anchorUid)) aFail = `--gateway-user ${one(gatewayUser).slice(0, 40)} does not resolve to a user on this machine${lastToolRefusal() ? ` (${lastToolRefusal()})` : ''}`;
       else {
         const p = await ping(socketPath);
         cfg = p.ok ? describedConfig(p.reply.layout, home) : null;
@@ -83,7 +85,7 @@ export async function runDoctor({ home = agentHome(), probes, priceFile = DEFAUL
       ...socketDirProblems(probes.stat(cfg.socket_dir), cfg.socket_dir, gw, gid),
     ];
     if (probs.length) return fail('a', 'config valid, owners and modes', one(probs[0].why) + (probs.length > 1 ? ` (+${probs.length - 1} more)` : ''), probs[0].fix);
-    return pass('a', 'config valid, owners and modes', described ? 'config.json is unreadable here (expected); the running gateway validated it, and AGENT_HOME and socket_dir are owned and moded as required' : 'config valid; AGENT_HOME 700, config.json not group/other writable, socket_dir 750, all owned correctly');
+    return pass('a', 'config valid, owners and modes', described ? 'config.json was NOT read by doctor (unreadable here, expected); the layout is the gateway\'s own report, unverified by doctor; doctor checked AGENT_HOME and socket_dir only as far as this user can see them' : 'config valid; AGENT_HOME 700, config.json not group/other writable, socket_dir 750, all owned correctly');
   }, 'check ownership and modes of AGENT_HOME, config.json and socket_dir by hand (ls -ld)');
 
   // Trust anchor (only when config.json is unreadable): everything is checked against the human-supplied gateway user, never against the environment.
@@ -92,26 +94,35 @@ export async function runDoctor({ home = agentHome(), probes, priceFile = DEFAUL
     if (trustMemo) return trustMemo;
     const why = [];
     const hint = resolve(socketPath);
-    const owner = (st, what) => { if (!st.ok) why.push(`${what} cannot be inspected (${st.code})`); else if (st.uid !== anchorUid) why.push(`${what} is owned by uid ${st.uid}, not ${one(gatewayUser).slice(0, 40)} (uid ${anchorUid})`); };
+    const owner = (st, what) => {
+      if (!st || st.ok !== true) why.push(`${what} cannot be inspected (${known(st?.code) ?? 'no reason given'})`);
+      else if (!isInt(st.uid)) why.push(`the owner of ${what} was not reported`);
+      else if (st.uid !== anchorUid) why.push(`${what} is owned by uid ${st.uid}, not ${one(gatewayUser).slice(0, 40)} (uid ${anchorUid})`);
+    };
     const me = probes.uid();
     if (me === 0 || me === anchorUid) why.push(`doctor runs as uid ${me}, which cannot prove the boundary`);
     if (c.socket_path !== hint) why.push('the gateway describes a socket path that is not the one asked for');
     if (c.socket_dir !== dirname(hint)) why.push('the described socket_dir is not the directory of the socket asked for');
     owner(probes.stat(c.socket_dir), 'socket_dir'); owner(probes.stat(c.socket_path), 'the socket');
     const dFile = join(c.socket_dir, 'gateway.json');
-    owner(probes.stat(dFile), 'the discovery file (gateway.json)');
+    const dSt = probes.stat(dFile);
+    owner(dSt, 'the discovery file (gateway.json)');
+    if (dSt?.ok === true && isInt(dSt.mode) && (dSt.mode & 0o022) !== 0) why.push('the discovery file (gateway.json) is writable by group or others');
     const v = probes.tryCreate(c.socket_dir);
     if (v !== 'denied') why.push(`socket_dir is writable by this identity (${v === 'allowed' ? 'ALLOWED' : `not proven denied: ${v}`}), so anyone here could plant a socket`);
     let d = null; try { d = probes.readDiscovery(dFile); } catch { d = null; }
     if (!d) why.push('the discovery file is missing, unreadable or malformed');
     else {
-      if (d.gateway_uid !== anchorUid) why.push(`the discovery file names uid ${d.gateway_uid}, not the gateway uid ${anchorUid}`);
+      if (!isInt(d.gateway_uid)) why.push('the discovery file did not report gateway_uid');
+      else if (d.gateway_uid !== anchorUid) why.push(`the discovery file names uid ${d.gateway_uid}, not the gateway uid ${anchorUid}`);
       if (d.socket_path !== hint) why.push('the discovery file names a different socket path');
+      if (pinged?.ok && Number.isSafeInteger(d.pid) && d.pid !== pinged.reply.pid) why.push(`the discovery file names pid ${d.pid} but the answering gateway reports pid ${pinged.reply.pid}`);
       const pi = pinged?.ok ? pinged.reply.instance_id : null;
       if (typeof pi !== 'string' || pi !== d.instance_id) why.push('the instance_id from ping does not match the discovery file (the answering process is not the one that wrote it)');
     }
     if (!pinged?.ok) why.push('the gateway did not answer a ping');
-    else if (pinged.reply.layout?.gateway_uid !== anchorUid) why.push(`the gateway describes its own uid as ${pinged.reply.layout?.gateway_uid}, not ${anchorUid}`);
+    else if (!isInt(pinged.reply.layout?.gateway_uid)) why.push('the gateway did not report gateway_uid in its layout');
+    else if (pinged.reply.layout.gateway_uid !== anchorUid) why.push(`the gateway describes its own uid as ${pinged.reply.layout.gateway_uid}, not ${anchorUid}`);
     trustMemo = why;
     return why;
   };
@@ -163,7 +174,8 @@ export async function runDoctor({ home = agentHome(), probes, priceFile = DEFAUL
       if (typeof probes.peerDecision !== 'function') return fail('e', 'peer-uid probe or kernel permissions only', 'the gateway uses a peer-uid probe that doctor cannot exercise', 'provide the probe to doctor, or run the gateway without one (kernel permissions only)');
       const d = await probes.peerDecision();
       if (d?.runnerAdmitted === true && d?.otherAdmitted === false) return pass('e', 'peer-uid probe or kernel permissions only', 'the real probe admits the runner uid and refuses another uid');
-      return fail('e', 'peer-uid probe or kernel permissions only', one(`the probe admitted ${JSON.stringify(d)?.slice(0, 80)}; it must admit the runner and refuse others`), 'fix the probe or allowed_peer_uids; unknown answers must refuse');
+      const seen = d && typeof d === 'object' ? `runnerAdmitted=${known(d.runnerAdmitted) ?? 'not reported'}, otherAdmitted=${known(d.otherAdmitted) ?? 'not reported'}` : 'no decision was returned';
+      return fail('e', 'peer-uid probe or kernel permissions only', one(`the probe did not give the required answer (${seen}); it must admit the runner and refuse others`), 'fix the probe or allowed_peer_uids; unknown answers must refuse');
     }
     const earlier = checks.filter((k) => ['a', 'b', 'c', 'd'].includes(k.id));
     if (earlier.length === 4 && earlier.every((k) => k.ok)) return pass('e', 'peer-uid probe or kernel permissions only', 'kernel permissions only (no peer-uid probe); access rests on checks a, b, c and d, which passed');
@@ -182,7 +194,7 @@ export async function runDoctor({ home = agentHome(), probes, priceFile = DEFAUL
     if (!isGatewayCmdline(info.cmdline)) return fail('f', 'no TCP listener', `pid ${pid} is not the gateway (its command line is not "agent gateway")`, 'stop whatever holds that pid and start the gateway with: agent gateway');
     if (Number.isSafeInteger(info.uid) && info.uid !== gw) return fail('f', 'no TCP listener', `pid ${pid} runs as uid ${info.uid}, not the gateway uid ${gw}`, 'start the gateway under the gateway user');
     const l = await probes.tcpListeners(info, { gatewayUid: gw });
-    if (l === null || l === undefined) return fail('f', 'no TCP listener', 'cannot inspect the gateway process\'s sockets as this user', 'on Linux read /proc needs no help; on macOS run only this check as root: sudo agent doctor --only f');
+    if (l === null || l === undefined) return fail('f', 'no TCP listener', `cannot inspect the gateway process\'s sockets as this user${lastToolRefusal() ? ` (${lastToolRefusal()})` : ''}`, 'on Linux read /proc needs no help; on macOS run only this check as root: sudo agent doctor --only f');
     if (l.length) return fail('f', 'no TCP listener', `gateway listens on TCP: ${l.join(', ').slice(0, 100)}`, 'stop the gateway; it must listen only on its Unix socket');
     return pass('f', 'no TCP listener', `verified pid ${pid} is the gateway; it has no TCP listening socket`);
   }, 'check listeners by hand (lsof -nP -iTCP -sTCP:LISTEN, or ss -ltnp)');

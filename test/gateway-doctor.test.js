@@ -328,3 +328,54 @@ test('config.json MISSING (not denied): check (a) tells the runner to set AGENT_
   const denied = await asRunner(s, deniedProbes(s));
   assert.equal(denied.ok, true, formatDoctor(denied)); assert.match(byId(denied, 'a').why, /unreadable here/);
 });
+
+const noUndefined = (r) => { for (const c of r.checks) assert.doesNotMatch(`${c.why} ${c.fix}`, /undefined/, `check ${c.id}: ${c.why}`); assert.doesNotMatch(formatDoctor(r), /undefined/); };
+
+test('no doctor reason ever prints "undefined": each missing field gets a readable reason', async () => {
+  const s = setup();
+  const sockPath = s.cfg.socket_path; const sockDir = s.cfg.socket_dir;
+  const base = deniedProbes(s);
+  // stat answers without a uid, or fails with no code
+  const noUid = await asRunner(s, deniedProbes(s, { stat: (p) => (p === sockPath ? { ok: true, type: 'socket', mode: 0o660, gid: GID } : base.stat(p)) }));
+  noUndefined(noUid); assert.match(byId(noUid, 'b').why, /owner of the socket was not reported/);
+  const noCode = await asRunner(s, deniedProbes(s, { stat: (p) => (p === sockDir ? { ok: false } : base.stat(p)) }));
+  noUndefined(noCode); assert.match(byId(noCode, 'b').why, /socket_dir cannot be inspected \(no reason given\)/);
+  // discovery file without gateway_uid
+  const noDiscUid = await asRunner(s, deniedProbes(s, { readDiscovery: () => ({ ...base.disc, gateway_uid: undefined }) }));
+  noUndefined(noDiscUid); assert.match(byId(noDiscUid, 'b').why, /discovery file did not report gateway_uid/);
+  // the ping layout without gateway_uid (the layout is then not described at all)
+  const { gateway_uid: _drop, ...layoutNoUid } = s.layout;
+  const noLayoutUid = await asRunner(s, deniedProbes(s, { ping: async () => ({ id: 1, ok: true, result: { version: 'm1a.1', uptime_ms: 1, pid: PID, instance_id: IID, layout: layoutNoUid } }) }));
+  noUndefined(noLayoutUid);
+  // the peer decision probe returns nothing, or an object without the fields
+  for (const d of [undefined, null, {}, { runnerAdmitted: true }]) {
+    const r = await run(s, healthy(s, { peerDecision: async () => d }));
+    noUndefined(r); assert.equal(byId(r, 'e').ok, false); assert.match(byId(r, 'e').why, /did not give the required answer/);
+  }
+  assert.match(byId(await run(s, healthy(s, { peerDecision: async () => undefined })), 'e').why, /no decision was returned/);
+});
+
+test('check (a) via ping says doctor did NOT read config.json and the layout is the gateway\'s own unverified report', async () => {
+  const s = setup();
+  const r = await asRunner(s, deniedProbes(s));
+  const why = byId(r, 'a').why;
+  assert.equal(byId(r, 'a').ok, true);
+  assert.match(why, /NOT read by doctor/); assert.match(why, /gateway's own report, unverified by doctor/); assert.doesNotMatch(why, /validated/);
+});
+
+test('a failed trust anchor names check (e) properly (it used to print "FAIL (e) undefined")', async () => {
+  const s = setup();
+  const r = await asRunner(s, deniedProbes(s, { uid: () => 0 }));
+  assert.equal(byId(r, 'e').ok, false); assert.equal(byId(r, 'e').name, 'peer-uid probe or kernel permissions only');
+  noUndefined(r);
+});
+
+test('round 2 low: the discovery file must not be group/world writable and its pid must be the answering gateway\'s', async () => {
+  const s = setup();
+  const base = deniedProbes(s);
+  const writable = await asRunner(s, deniedProbes(s, { stat: (p) => (p.endsWith('gateway.json') ? { ...base.stat(p), mode: 0o664 } : base.stat(p)) }));
+  assert.equal(byId(writable, 'b').ok, false); assert.match(byId(writable, 'b').why, /discovery file \(gateway.json\) is writable/);
+  const wrongPid = await asRunner(s, deniedProbes(s, { readDiscovery: () => ({ ...base.disc, pid: PID + 1 }) }));
+  assert.equal(byId(wrongPid, 'b').ok, false); assert.match(byId(wrongPid, 'b').why, /names pid/);
+  noUndefined(writable); noUndefined(wrongPid);
+});

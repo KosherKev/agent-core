@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
-import { readFileSync, readdirSync, statSync, mkdtempSync, existsSync } from 'node:fs';
+import { readFileSync, readdirSync, statSync, mkdtempSync, existsSync, writeFileSync, chmodSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -120,4 +120,24 @@ test('doctor with an unreadable config, AGENT_GATEWAY_SOCKET set and no --gatewa
   assert.equal(code, EXIT.FAILED); assert.equal(pinged, 0);
   assert.match(c.out.join('\n'), /--gateway-user/);
   for (const id of ['b', 'c', 'd', 'f']) assert.match(c.out.join('\n'), new RegExp(`FAIL \\(${id}\\)`));
+});
+
+test('status: an unreadable config.json is "not readable by this user" (expected for the runner); a readable bad one stays INVALID', async (t) => {
+  const home = newHome(); const env = { AGENT_HOME: home };
+  assert.equal(await main(['init'], { env, io: cap().io }), EXIT.OK);
+  const cfg = join(home, 'config.json');
+  const good = readFileSync(cfg, 'utf8');
+  writeFileSync(cfg, '{ not json');
+  const bad = cap();
+  assert.equal(await main(['status'], { env, io: bad.io }), EXIT.FAILED);
+  assert.match(bad.out.join('\n'), /config: INVALID/);
+  writeFileSync(cfg, good); chmodSync(cfg, 0o000);
+  try {
+    if (process.getuid?.() === 0) { t.skip('root ignores file modes'); return; }
+    const den = cap();
+    assert.equal(await main(['status'], { env, io: den.io }), EXIT.FAILED);
+    const text = den.out.join('\n');
+    assert.match(text, /not readable by this user \(expected for the runner/); assert.match(text, /agent doctor --gateway-user/);
+    assert.doesNotMatch(text, /INVALID|EACCES/);
+  } finally { chmodSync(cfg, 0o600); }
 });

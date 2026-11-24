@@ -1,5 +1,5 @@
 import { readFileSync } from 'node:fs';
-import { execFileSync } from 'node:child_process';
+import { runToolSync } from './tools.js';
 
 /**
  * Small OS lookups with no network: group name to gid, and what is running under a pid.
@@ -18,7 +18,7 @@ export function resolveGroup(group) {
   } catch { /* no /etc/group: try the directory service */ }
   if (process.platform === 'darwin') {
     try {
-      const out = execFileSync('dscl', ['.', '-read', `/Groups/${group}`, 'PrimaryGroupID'], { encoding: 'utf8', timeout: 5000, stdio: ['ignore', 'pipe', 'ignore'] });
+      const out = runToolSync('dscl', ['.', '-read', `/Groups/${group}`, 'PrimaryGroupID']);
       const m = /PrimaryGroupID:\s*(\d+)/.exec(out);
       if (m) return Number(m[1]);
     } catch { /* unknown group */ }
@@ -36,7 +36,7 @@ export function resolveUser(name) {
     }
   } catch { /* no /etc/passwd: ask `id` */ }
   try { // the system's own answer (covers directory-service users); `id -u` prints only the number
-    const out = execFileSync('id', ['-u', name], { encoding: 'utf8', timeout: 5000, stdio: ['ignore', 'pipe', 'ignore'] }).trim();
+    const out = runToolSync('id', ['-u', name]).trim();
     if (/^\d+$/.test(out)) return Number(out);
   } catch { /* unknown user */ }
   return null;
@@ -53,7 +53,7 @@ export function processInfo(pid) {
     return { pid, uid: u ? Number(u[1]) : null, cmdline: raw.split('\0').filter(Boolean).join(' ') };
   } catch { /* not Linux, or /proc hidden: fall back to ps */ }
   try {
-    const out = execFileSync('ps', ['-o', 'uid=,command=', '-p', String(pid)], { encoding: 'utf8', timeout: 5000, stdio: ['ignore', 'pipe', 'ignore'] }).trim();
+    const out = runToolSync('ps', ['-o', 'uid=,command=', '-p', String(pid)]).trim();
     const m = /^(\d+)\s+(.*)$/.exec(out);
     return m ? { pid, uid: Number(m[1]), cmdline: m[2] } : null;
   } catch { return null; }
