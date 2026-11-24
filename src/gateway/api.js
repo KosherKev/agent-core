@@ -5,7 +5,7 @@ import { priceKey } from './prices.js';
 import { callProvider, ProxyError } from './proxy.js';
 import { makeRedactor, redactDeep } from './credentials.js';
 import { OUTCOMES } from './runs.js';
-import { createHash } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 
 export const GATEWAY_VERSION = 'm1a.1';
 export const NOT_IMPLEMENTED = 'not implemented in M1a';
@@ -25,9 +25,17 @@ function pick(o, keys) { const out = {}; for (const k of keys) if (o && o[k] !==
  * `transport` is the injectable provider HTTP function (tests only; the default is the real client inside proxy.js).
  * handle(request) -> response; it never throws. Every response (ok or error) for a known run carries `budget`.
  */
-export function createGatewayApi({ config, store, runs, credentials, priceTable, now = Date.now, transport, log = () => {}, makeSink, access = 'kernel-permissions', layoutInfo = () => ({}) }) {
+export function createGatewayApi({ config, store, runs, credentials, priceTable, now = Date.now, transport, log = () => {}, makeSink, access = 'kernel-permissions', layoutInfo = () => ({}), instanceId = randomBytes(16).toString('hex'), requestCacheMax = config.request_cache_max ?? 1024 }) {
   const redact = makeRedactor(credentials.secrets());
-  const open = new Map(); // run_id -> { meter, reservations: Map, requests: Map(request_id -> { fp, done }), inflight }
+  const open = new Map(); // run_id -> { meter, reservations: Map, inflight }
+  // Bounded LRU of modelCall records, keyed run_id + request_id: { fp, done, settled }. In-flight entries are never evicted; a settled entry is evicted
+  // only once its outcome is persisted, and a miss falls back to that persisted record, so eviction can never cause a second reservation or settlement.
+  const cache = new Map();
+  const ckey = (runId, requestId) => `${runId}\0${requestId}`;
+  const evict = () => {
+    if (cache.size <= requestCacheMax) return;
+    for (const [k, e] of cache) { if (cache.size <= requestCacheMax) break; if (e.settled) cache.delete(k); }
+  };
   const startedAt = now();
 
   const run = (id) => {
@@ -71,7 +79,7 @@ export function createGatewayApi({ config, store, runs, credentials, priceTable,
 
   const methods = {
     async ping() {
-      return { result: { version: GATEWAY_VERSION, uptime_ms: Math.max(0, now() - startedAt), pid: process.pid, access, layout: layoutInfo() } };
+      return { result: { version: GATEWAY_VERSION, uptime_ms: Math.max(0, now() - startedAt), pid: process.pid, instance_id: instanceId, access, layout: layoutInfo() } };
     },
     async openRun(p) {
       if (typeof p.run_id !== 'string' || !RUN_ID.test(p.run_id)) throw bad('run_id is missing or malformed');
@@ -81,7 +89,7 @@ export function createGatewayApi({ config, store, runs, credentials, priceTable,
       let model;
       if (p.provider !== undefined || p.model !== undefined) model = keyFor(p.provider, p.model);
       const meter = createMeter(p.grant, { now, priceTable, model, ledger: store.meterLedger(), runId: p.run_id, ...(makeSink ? { sink: makeSink(p.run_id) } : {}) });
-      const r = { meter, reservations: new Map(), requests: new Map(), inflight: 0 };
+      const r = { meter, reservations: new Map(), inflight: 0 };
       open.set(p.run_id, r);
       try { runs.start(p.run_id, { provider: p.provider, model: p.model }); } catch (e) { open.delete(p.run_id); try { meter.end('failed'); } catch { /* conservative: reservations stay counted */ } throw e; }
       return { result: { run_id: p.run_id }, run: r };
@@ -94,6 +102,7 @@ export function createGatewayApi({ config, store, runs, credentials, priceTable,
       runs.end(p.run_id, p.outcome);
       const budget = budgetOf(r);
       open.delete(p.run_id);
+      for (const k of [...cache.keys()]) if (k.startsWith(`${p.run_id}\0`)) cache.delete(k);
       return { result: { run_id: p.run_id, record: runs.read(p.run_id).record }, run: r, budget };
     },
     async reserve(p) {
@@ -125,22 +134,42 @@ export function createGatewayApi({ config, store, runs, credentials, priceTable,
       if (!credentials.get(p.provider)) throw new RequestError('credential', 'no credential for this provider; refusing');
       // One logical call per request_id on a run: a repeat never reserves or settles again. It gets the recorded outcome (or waits for the in-flight one).
       const fp = createHash('sha256').update(JSON.stringify([p.provider, p.model, p.messages, p.max_tokens ?? null])).digest('hex');
-      const seen = r.requests.get(p.request_id);
+      const key = ckey(p.run_id, p.request_id);
+      let seen = cache.get(key);
+      if (!seen) {
+        // Not in memory (never seen, or evicted): the run's persisted record decides. A record means the call already happened and must not be paid again.
+        let rec; try { rec = runs.findRequest(p.run_id, p.request_id); } catch { throw new RequestError('internal', 'cannot read the run record; refusing (fail closed)'); }
+        if (rec) {
+          if (rec.fp !== fp) throw new RequestError('request_id_conflict', 'request_id was already used on this run with different parameters; refusing');
+          const out = rec.ok ? (rec.result !== undefined ? { result: rec.result } : { err: new RequestError('request_result_unavailable', 'this request_id was already served but its result was not kept; refusing to pay twice') }) : { err: new RequestError(typeof rec.code === 'string' ? rec.code : 'internal', typeof rec.message === 'string' ? rec.message : 'the recorded call failed') };
+          seen = { fp, done: Promise.resolve(out), settled: true };
+          cache.set(key, seen); evict();
+        }
+      }
       if (seen) {
+        cache.delete(key); cache.set(key, seen); // most recently used
         if (seen.fp !== fp) throw new RequestError('request_id_conflict', 'request_id was already used on this run with different parameters; refusing');
         const o = await seen.done;
         if (o.err) throw o.err;
         return { result: o.result, run: r };
       }
-      const entry = { fp, done: null };
-      r.requests.set(p.request_id, entry);
+      const entry = { fp, done: null, settled: false };
+      cache.set(key, entry);
       r.inflight += 1;
-      // The call runs to completion and settles even if the client has gone away; its outcome stays recorded under the request_id.
+      // The call runs to completion and settles even if the client has gone away; its outcome is persisted under the request_id before it counts as settled.
       entry.done = (async () => {
-        try { return { result: await callModel(r, p) }; } catch (err) { return { err }; } finally { r.inflight -= 1; }
+        let o;
+        try { o = { result: await callModel(r, p) }; } catch (err) { o = { err }; }
+        try {
+          const e = o.err ? errorOf(o.err) : null;
+          runs.recordRequest(p.run_id, p.request_id, { ok: !e, fp, ...(e ? { code: e.code, message: redact(e.message) } : { cost_micro: o.result.cost_micro, result: redactDeep(o.result, redact) }) });
+          entry.settled = true;
+        } catch { /* not persisted: the entry stays pinned in memory, which is what dedupes */ }
+        r.inflight -= 1;
+        evict();
+        return o;
       })();
       const o = await entry.done;
-      try { runs.recordRequest(p.run_id, p.request_id, { ok: !o.err, ...(o.err ? { code: errorOf(o.err).code } : { cost_micro: o.result.cost_micro }) }); } catch { /* the in-memory record is what dedupes */ }
       if (o.err) throw o.err;
       return { result: o.result, run: r };
     },
@@ -190,5 +219,5 @@ export function createGatewayApi({ config, store, runs, credentials, priceTable,
     }
   }
 
-  return Object.freeze({ handle, openRuns: () => [...open.keys()] });
+  return Object.freeze({ handle, openRuns: () => [...open.keys()], instanceId, cacheSize: () => cache.size });
 }
