@@ -1,13 +1,13 @@
 import { readFileSync, readdirSync, readlinkSync, existsSync, statSync, openSync, closeSync, unlinkSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { createHash, randomBytes } from 'node:crypto';
-import { execFile } from 'node:child_process';
 import { REPO_ROOT } from '../self-model.js';
 import { request } from './client.js';
 import { loadConfig } from './config.js';
 import { realStat } from './layout.js';
 import { resolveGroup, resolveUser, processInfo } from './sys.js';
 import { readDiscovery } from './discovery.js';
+import { runToolAsync } from './tools.js';
 
 /** What one attempt at touching a protected path came to: 'denied' (the kernel said no), 'missing', 'allowed', or 'error:<code>'. */
 const verdictOf = (e) => (e?.code === 'EACCES' || e?.code === 'EPERM' ? 'denied' : e?.code === 'ENOENT' || e?.code === 'ENOTDIR' ? 'missing' : `error:${e?.code ?? 'unknown'}`);
@@ -60,11 +60,9 @@ function tcpListeners(info, { gatewayUid } = {}) {
   }
   const me = typeof process.getuid === 'function' ? process.getuid() : -1;
   if (me !== 0 && info.uid !== me) return null; // lsof would show nothing for another user's process; that is not "no listeners"
-  return new Promise((res) => {
-    execFile('lsof', ['-nP', '-a', '-p', String(info.pid), '-iTCP', '-sTCP:LISTEN', '-Fn'], { timeout: 5000 }, (err, out) => {
-      if (err && err.code !== 1) return res(null); // lsof exits 1 when nothing matches
-      res(String(out).split('\n').filter((l) => l.startsWith('n')));
-    });
+  return runToolAsync('lsof', ['-nP', '-a', '-p', String(info.pid), '-iTCP', '-sTCP:LISTEN', '-Fn']).then(({ err, out }) => {
+    if (err && err.code !== 1) return null; // lsof exits 1 when nothing matches; a refused tool or any other failure is "cannot tell" (doctor fails closed)
+    return String(out).split('\n').filter((l) => l.startsWith('n'));
   });
 }
 

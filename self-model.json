@@ -120,6 +120,10 @@
       "path": "src/gateway/sys.js"
     },
     {
+      "name": "gateway/tools",
+      "path": "src/gateway/tools.js"
+    },
+    {
       "name": "grant/expiry",
       "path": "src/grant/expiry.js"
     },

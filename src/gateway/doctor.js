@@ -4,6 +4,7 @@ import { loadGatewayPrices, checkPriceTable } from './prices.js';
 import { DEFAULT_PRICE_FILE } from '../grant/index.js';
 import { homeProblems, configFileProblems, socketDirProblems, socketProblems } from './layout.js';
 import { isGatewayCmdline } from './sys.js';
+import { lastToolRefusal } from './tools.js';
 
 const pass = (id, name, why) => ({ id, name, ok: true, why, fix: null });
 const fail = (id, name, why, fix) => ({ id, name, ok: false, why, fix });
@@ -58,7 +59,7 @@ export async function runDoctor({ home = agentHome(), probes, priceFile = DEFAUL
     else if (loaded.denied && !socketPath) aFail = 'config.json is not readable by this user (expected for the runner) and AGENT_GATEWAY_SOCKET (the location hint) is not set';
     else if (loaded.denied) {
       try { anchorUid = probes.resolveUser(gatewayUser); } catch { anchorUid = null; }
-      if (!isInt(anchorUid)) aFail = `--gateway-user ${one(gatewayUser).slice(0, 40)} does not resolve to a user on this machine`;
+      if (!isInt(anchorUid)) aFail = `--gateway-user ${one(gatewayUser).slice(0, 40)} does not resolve to a user on this machine${lastToolRefusal() ? ` (${lastToolRefusal()})` : ''}`;
       else {
         const p = await ping(socketPath);
         cfg = p.ok ? describedConfig(p.reply.layout, home) : null;
@@ -190,7 +191,7 @@ export async function runDoctor({ home = agentHome(), probes, priceFile = DEFAUL
     if (!isGatewayCmdline(info.cmdline)) return fail('f', 'no TCP listener', `pid ${pid} is not the gateway (its command line is not "agent gateway")`, 'stop whatever holds that pid and start the gateway with: agent gateway');
     if (Number.isSafeInteger(info.uid) && info.uid !== gw) return fail('f', 'no TCP listener', `pid ${pid} runs as uid ${info.uid}, not the gateway uid ${gw}`, 'start the gateway under the gateway user');
     const l = await probes.tcpListeners(info, { gatewayUid: gw });
-    if (l === null || l === undefined) return fail('f', 'no TCP listener', 'cannot inspect the gateway process\'s sockets as this user', 'on Linux read /proc needs no help; on macOS run only this check as root: sudo agent doctor --only f');
+    if (l === null || l === undefined) return fail('f', 'no TCP listener', `cannot inspect the gateway process\'s sockets as this user${lastToolRefusal() ? ` (${lastToolRefusal()})` : ''}`, 'on Linux read /proc needs no help; on macOS run only this check as root: sudo agent doctor --only f');
     if (l.length) return fail('f', 'no TCP listener', `gateway listens on TCP: ${l.join(', ').slice(0, 100)}`, 'stop the gateway; it must listen only on its Unix socket');
     return pass('f', 'no TCP listener', `verified pid ${pid} is the gateway; it has no TCP listening socket`);
   }, 'check listeners by hand (lsof -nP -iTCP -sTCP:LISTEN, or ss -ltnp)');
