@@ -56,6 +56,58 @@
       "path": "src/builder-redact.js"
     },
     {
+      "name": "gateway/api",
+      "path": "src/gateway/api.js"
+    },
+    {
+      "name": "gateway/cli",
+      "path": "src/gateway/cli.js"
+    },
+    {
+      "name": "gateway/client",
+      "path": "src/gateway/client.js"
+    },
+    {
+      "name": "gateway/config",
+      "path": "src/gateway/config.js"
+    },
+    {
+      "name": "gateway/credentials",
+      "path": "src/gateway/credentials.js"
+    },
+    {
+      "name": "gateway/doctor",
+      "path": "src/gateway/doctor.js"
+    },
+    {
+      "name": "gateway/init",
+      "path": "src/gateway/init.js"
+    },
+    {
+      "name": "gateway/prices",
+      "path": "src/gateway/prices.js"
+    },
+    {
+      "name": "gateway/probes",
+      "path": "src/gateway/probes.js"
+    },
+    {
+      "name": "gateway/proxy",
+      "path": "src/gateway/proxy.js"
+    },
+    {
+      "name": "gateway/runs",
+      "path": "src/gateway/runs.js"
+    },
+    {
+      "name": "gateway/server",
+      "path": "src/gateway/server.js"
+    },
+    {
+      "name": "gateway/store",
+      "path": "src/gateway/store.js"
+    },
+    {
       "name": "grant/expiry",
       "path": "src/grant/expiry.js"
     },

@@ -57,6 +57,9 @@ Add `schemas/v2/` alongside `v1/`; never change a published version in a breakin
 - A PR that changes the guard itself is judged by the old guard (base) and so fails like any other locked-path change; Code Owner review is the real control.
 - Until `main` exists with the guard on it, the check has no base to run from.
 
+## Gateway (M1a)
+`src/gateway/` and `bin/agent`: a Unix-socket gateway that holds the ledger, grant engine and provider credentials, proxies model calls (free models only) and ships `agent doctor`. See `docs/gateway.md`.
+
 ## OpenRouter builder adapter
 `src/builder-*.js` lets the contract drive an OpenAI-compatible model (default `particle-ai/particle-1:free` via OpenRouter) as a BUILDER only (R2: `role` accepts only `builder`; `overseer` and unknown roles are rejected at config load).
 - Config (`src/builder-config.js`): env `AGENT_BUILDER_MODEL`, `AGENT_BUILDER_BASE_URL`, `AGENT_BUILDER_ROLE`, `FREE_MODEL_REPO_ALLOWLIST` (default `agent-core`), provider prefs (`AGENT_BUILDER_PROVIDER_ORDER`, `AGENT_BUILDER_ALLOW_FALLBACKS`, `AGENT_BUILDER_DATA_COLLECTION`), plus an optional untracked `.agent-builder.local.json`. `OPENROUTER_API_KEY` is env only and is redacted from every journal entry, error and commit. A `:free` model is refused before any network call unless every git remote of the workdir (not the task input) is an allowlisted GitHub repo. The base URL must be https (plain http only for 127.0.0.1, ::1, localhost).
