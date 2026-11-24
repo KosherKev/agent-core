@@ -1,10 +1,20 @@
 import { readFileSync, writeFileSync, existsSync } from 'node:fs';
-import { join } from 'node:path';
-import { generateSelfModel, serialize, REPO_ROOT } from '../src/self-model.js';
+import { join, resolve } from 'node:path';
+import { generateSelfModel, serialize, loadCapabilities, formatCapabilityErrors, REPO_ROOT } from '../src/self-model.js';
 import { validateSelfModel } from '../src/validators.js';
 
-const out = join(REPO_ROOT, 'self-model.json');
-const model = generateSelfModel();
+// --root <dir> points the generator at another tree (used by tests with a temp dir); default is this repo.
+const ri = process.argv.indexOf('--root');
+const root = ri >= 0 ? resolve(process.argv[ri + 1] ?? '') : REPO_ROOT;
+const out = join(root, 'self-model.json');
+
+// A present-but-broken capability manifest fails both the build and --check. A missing manifest is optional.
+const loaded = await loadCapabilities(root);
+if (loaded.errors.length) {
+  console.error(`Capability manifest error:\n${formatCapabilityErrors(loaded.errors)}`);
+  process.exit(1);
+}
+const model = generateSelfModel(root, loaded);
 const r = validateSelfModel(model);
 if (!r.valid) { console.error('Generated self-model is invalid:', r.errors.join('; ')); process.exit(1); }
 const text = serialize(model);
