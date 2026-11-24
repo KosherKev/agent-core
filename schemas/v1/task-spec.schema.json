@@ -9,7 +9,7 @@
   "properties": {
     "schema_version": { "const": "1" },
     "goal": { "type": "string", "minLength": 1, "pattern": "\\S" },
-    "repo": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9.-]*\\.[A-Za-z]{2,}/[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9._-]+$", "description": "Repo identity as host/owner/name, for example github.com/KosherKev/agent-core." },
+    "repo": { "type": "string", "pattern": "^(?=[^/]{1,253}/)(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\\.)+[A-Za-z]{2,63}/(?!\\.{1,2}/)[A-Za-z0-9_.-]{1,100}/(?!\\.{1,2}$)(?![A-Za-z0-9_.-]*\\.[gG][iI][tT]$)[A-Za-z0-9_.-]{1,100}$", "description": "Repo identity as host/owner/name, for example github.com/KosherKev/agent-core. Host is a DNS-style hostname; owner and name are 1 to 100 of letters, digits, _ - and .; a segment of . or .., a name ending in .git (any case), empty segments, whitespace, backslashes, percent signs, control characters and non-ASCII are rejected." },
     "branch": { "type": "string", "minLength": 1, "pattern": "\\S" },
     "grant": { "$ref": "grant", "description": "The grant embedded in full." },
     "grant_ref": { "type": "string", "minLength": 1, "description": "The task_id of a grant held elsewhere." }
