@@ -25,7 +25,7 @@ export const LIMITS = Object.freeze({
   shutdown_grace_ms: [10_000, 0, 600_000],
   request_read_timeout_ms: [10_000, 1, 3_600_000],
   request_cache_max: [1024, 1, 1_000_000],
-  run_file_max_bytes: [64 * 1024 * 1024, 1024, 1024 * 1024 * 1024],
+  run_file_max_bytes: [64 * 1024 * 1024, 1024, 256 * 1024 * 1024],
 });
 const GROUP_NAME = /^[A-Za-z_][A-Za-z0-9_.-]{0,31}$/;
 const inside = (child, parent) => child === parent || child.startsWith(parent.endsWith(sep) ? parent : parent + sep);
@@ -61,7 +61,12 @@ export function validateConfig(raw, home) {
   if (isPath(raw.socket_dir) && !isAbsolute(raw.socket_dir)) errors.push('socket_dir must be an absolute path (it lives outside AGENT_HOME)');
   const grp = raw.runner_group;
   if (!(typeof grp === 'string' && GROUP_NAME.test(grp)) && !isUid(grp)) errors.push('runner_group must be a group name or a non-negative integer gid');
-  for (const [k, [, lo, hi]] of Object.entries(LIMITS)) if (raw[k] !== undefined && !(Number.isSafeInteger(raw[k]) && raw[k] >= lo && raw[k] <= hi)) errors.push(`${k} must be an integer from ${lo} to ${hi}`);
+  for (const [k, [, lo, hi]] of Object.entries(LIMITS)) {
+    if (raw[k] === undefined || (Number.isSafeInteger(raw[k]) && raw[k] >= lo && raw[k] <= hi)) continue;
+    errors.push(k === 'run_file_max_bytes' && Number.isSafeInteger(raw[k]) && raw[k] > hi
+      ? `${k} is ${raw[k]}, over the ceiling of ${hi} bytes (256 MiB): a run file is read into one JavaScript string, and larger values cannot be read reliably; lower it`
+      : `${k} must be an integer from ${lo} to ${hi}`);
+  }
   const ids = raw.identities;
   if (!ids || typeof ids !== 'object' || Array.isArray(ids)) errors.push('identities must be an object');
   else {
