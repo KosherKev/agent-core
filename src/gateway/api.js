@@ -5,25 +5,30 @@ import { priceKey } from './prices.js';
 import { callProvider, ProxyError } from './proxy.js';
 import { makeRedactor, redactDeep } from './credentials.js';
 import { OUTCOMES } from './runs.js';
+import { createHash } from 'node:crypto';
 
+export const GATEWAY_VERSION = 'm1a.1';
 export const NOT_IMPLEMENTED = 'not implemented in M1a';
-export const METHODS = Object.freeze(['openRun', 'endRun', 'reserve', 'settle', 'release', 'modelCall', 'journalAppend', 'journalRead', 'pushBranch', 'requestMerge']);
+export const METHODS = Object.freeze(['ping', 'openRun', 'endRun', 'reserve', 'settle', 'release', 'modelCall', 'journalAppend', 'journalRead', 'pushBranch', 'requestMerge']);
 
 class RequestError extends Error { constructor(code, message) { super(message); this.name = 'RequestError'; this.code = code; } }
 const bad = (m) => new RequestError('invalid_request', m);
 const RUN_ID = /^[A-Za-z0-9._:-]{1,100}$/;
+const REQUEST_ID = RUN_ID;
 const MAX_MESSAGES = 512;
 
 function pick(o, keys) { const out = {}; for (const k of keys) if (o && o[k] !== undefined) out[k] = o[k]; return out; }
 
 /**
  * The gateway's request handler. It owns the meter per open run, the ledger store, the run records and the credentials.
- * deps: { config, store, runs, credentials, priceTable, now, fetchFn, log, sink(runId) }
+ * deps: { config, store, runs, credentials, priceTable, now, transport, log, makeSink(runId), access, layoutInfo }
+ * `transport` is the injectable provider HTTP function (tests only; the default is the real client inside proxy.js).
  * handle(request) -> response; it never throws. Every response (ok or error) for a known run carries `budget`.
  */
-export function createGatewayApi({ config, store, runs, credentials, priceTable, now = Date.now, fetchFn, log = () => {}, makeSink }) {
+export function createGatewayApi({ config, store, runs, credentials, priceTable, now = Date.now, transport, log = () => {}, makeSink, access = 'kernel-permissions', layoutInfo = () => ({}) }) {
   const redact = makeRedactor(credentials.secrets());
-  const open = new Map(); // run_id -> { meter, provider, model, reservations: Map }
+  const open = new Map(); // run_id -> { meter, reservations: Map, requests: Map(request_id -> { fp, done }), inflight }
+  const startedAt = now();
 
   const run = (id) => {
     if (typeof id !== 'string' || !RUN_ID.test(id)) throw bad('run_id is missing or malformed');
@@ -49,7 +54,25 @@ export function createGatewayApi({ config, store, runs, credentials, priceTable,
     return res;
   };
 
+  const callModel = async (r, p) => {
+    const res = doReserve(r, { provider: p.provider, model: p.model, input: p.messages, max_tokens: p.max_tokens });
+    let out;
+    try { out = await callProvider({ config, credentials, provider: p.provider, model: p.model, messages: p.messages, maxTokens: res.max_tokens, send: transport, timeoutMs: config.provider_timeout_ms, maxBytes: config.max_response_bytes }); } catch (e) { r.reservations.delete(res.id); r.meter.release(res, 'proxy'); throw e; }
+    r.reservations.delete(res.id);
+    runs.setModel(p.run_id, p.provider, p.model);
+    if (out.networkError) { r.meter.settle(res, null); throw new RequestError('provider_error', 'provider request failed; the reservation was settled at worst case'); }
+    if (!out.ok) { r.meter.release(res, `http ${out.status}`); throw new RequestError('provider_rejected', `provider rejected the request (HTTP ${out.status})`); }
+    const cost = r.meter.settle(res, out.json?.usage);
+    const choice = out.json?.choices?.[0];
+    if (!choice || typeof choice !== 'object') throw new RequestError('bad_response', 'provider response has no choices (the call was settled)');
+    const u = out.json.usage ?? {};
+    return { message: choice.message ?? null, finish_reason: choice.finish_reason ?? null, usage: pick(u, ['prompt_tokens', 'completion_tokens']), cost_micro: cost };
+  };
+
   const methods = {
+    async ping() {
+      return { result: { version: GATEWAY_VERSION, uptime_ms: Math.max(0, now() - startedAt), pid: process.pid, access, layout: layoutInfo() } };
+    },
     async openRun(p) {
       if (typeof p.run_id !== 'string' || !RUN_ID.test(p.run_id)) throw bad('run_id is missing or malformed');
       if (open.has(p.run_id) || runs.exists(p.run_id)) throw new RequestError('run_exists', 'run id already used; refusing');
@@ -58,13 +81,14 @@ export function createGatewayApi({ config, store, runs, credentials, priceTable,
       let model;
       if (p.provider !== undefined || p.model !== undefined) model = keyFor(p.provider, p.model);
       const meter = createMeter(p.grant, { now, priceTable, model, ledger: store.meterLedger(), runId: p.run_id, ...(makeSink ? { sink: makeSink(p.run_id) } : {}) });
-      const r = { meter, reservations: new Map() };
+      const r = { meter, reservations: new Map(), requests: new Map(), inflight: 0 };
       open.set(p.run_id, r);
       try { runs.start(p.run_id, { provider: p.provider, model: p.model }); } catch (e) { open.delete(p.run_id); try { meter.end('failed'); } catch { /* conservative: reservations stay counted */ } throw e; }
       return { result: { run_id: p.run_id }, run: r };
     },
     async endRun(p) {
       const r = run(p.run_id);
+      if (r.inflight > 0) throw new RequestError('busy', 'a model call is still in flight on this run; end the run after it settles');
       if (!OUTCOMES.includes(p.outcome)) throw bad(`outcome must be one of ${OUTCOMES.join(', ')}`);
       r.meter.end(p.outcome); // ledger run_end; open reservations stay counted against the grant (conservative)
       runs.end(p.run_id, p.outcome);
@@ -95,21 +119,30 @@ export function createGatewayApi({ config, store, runs, credentials, priceTable,
     },
     async modelCall(p) {
       const r = run(p.run_id);
+      if (typeof p.request_id !== 'string' || !REQUEST_ID.test(p.request_id)) throw bad('request_id is required (1 to 100 of A-Z a-z 0-9 . _ : -)');
       if (!Array.isArray(p.messages) || p.messages.length < 1 || p.messages.length > MAX_MESSAGES || !p.messages.every((m) => m && typeof m === 'object' && !Array.isArray(m) && typeof m.role === 'string')) throw bad('messages must be a non-empty array of { role, content }');
       checkProvider(p.provider);
       if (!credentials.get(p.provider)) throw new RequestError('credential', 'no credential for this provider; refusing');
-      const res = doReserve(r, { provider: p.provider, model: p.model, input: p.messages, max_tokens: p.max_tokens });
-      let out;
-      try { out = await callProvider({ config, credentials, provider: p.provider, model: p.model, messages: p.messages, maxTokens: res.max_tokens, fetchFn }); } catch (e) { r.reservations.delete(res.id); r.meter.release(res, 'proxy'); throw e; }
-      r.reservations.delete(res.id);
-      runs.setModel(p.run_id, p.provider, p.model);
-      if (out.networkError) { r.meter.settle(res, null); throw new RequestError('provider_error', 'provider request failed; the reservation was settled at worst case'); }
-      if (!out.ok) { r.meter.release(res, `http ${out.status}`); throw new RequestError('provider_rejected', `provider rejected the request (HTTP ${out.status})`); }
-      const cost = r.meter.settle(res, out.json?.usage);
-      const choice = out.json?.choices?.[0];
-      if (!choice || typeof choice !== 'object') throw new RequestError('bad_response', 'provider response has no choices (the call was settled)');
-      const u = out.json.usage ?? {};
-      return { result: { message: choice.message ?? null, finish_reason: choice.finish_reason ?? null, usage: pick(u, ['prompt_tokens', 'completion_tokens']), cost_micro: cost }, run: r };
+      // One logical call per request_id on a run: a repeat never reserves or settles again. It gets the recorded outcome (or waits for the in-flight one).
+      const fp = createHash('sha256').update(JSON.stringify([p.provider, p.model, p.messages, p.max_tokens ?? null])).digest('hex');
+      const seen = r.requests.get(p.request_id);
+      if (seen) {
+        if (seen.fp !== fp) throw new RequestError('request_id_conflict', 'request_id was already used on this run with different parameters; refusing');
+        const o = await seen.done;
+        if (o.err) throw o.err;
+        return { result: o.result, run: r };
+      }
+      const entry = { fp, done: null };
+      r.requests.set(p.request_id, entry);
+      r.inflight += 1;
+      // The call runs to completion and settles even if the client has gone away; its outcome stays recorded under the request_id.
+      entry.done = (async () => {
+        try { return { result: await callModel(r, p) }; } catch (err) { return { err }; } finally { r.inflight -= 1; }
+      })();
+      const o = await entry.done;
+      try { runs.recordRequest(p.run_id, p.request_id, { ok: !o.err, ...(o.err ? { code: errorOf(o.err).code } : { cost_micro: o.result.cost_micro }) }); } catch { /* the in-memory record is what dedupes */ }
+      if (o.err) throw o.err;
+      return { result: o.result, run: r };
     },
     async journalAppend(p) {
       const r = run(p.run_id);

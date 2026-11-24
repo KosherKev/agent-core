@@ -1,5 +1,49 @@
 # LOG
 
+## 2026-11-24 (Gateway M1a fix round)
+### What was done
+Branch task/gateway-m1a-fixes off origin/main 8a47113 (merge of PR 13). One commit per issue. Only `src/gateway/`, `docs/gateway.md`, README.md, new/changed `test/gateway-*.test.js`, self-model.json and this file changed.
+1. Idle timeout and double-pay. The idle timer runs only when no request is in flight (timer disabled while serving, re-armed after the response). The provider call has its own `provider_timeout_ms` (120000), the connection `idle_timeout_ms` (30000); both are config keys and injectable. `modelCall` requires `request_id`; the gateway keeps `request_id -> { params fingerprint, outcome }` per run: a repeat (in flight or settled) gets the recorded outcome and never reserves or settles again, a repeat with different parameters is `request_id_conflict`. The call runs to completion and settles even if the client is gone. `endRun` during an in-flight call is `busy`. New `ping` method. `fetchFn` renamed `transport` in api/cli and `send` in proxy (the structural test greps for the old name).
+2. Kernel-enforced access. New config keys `socket_dir` (absolute, outside AGENT_HOME), `runner_group` (name or gid), limits; `allowed_peer_uids` optional; `config_version` still 1; unknown keys refused; all state paths must be inside AGENT_HOME. New `src/gateway/layout.js` (pure checks, creates socket_dir 750 only if missing) and `sys.js` (group lookup, process info). The server verifies AGENT_HOME 700, config.json not group/other writable, socket_dir 750 group runner_group, running uid = gateway_uid BEFORE listening (and `startGateway` checks before creating anything under AGENT_HOME), sets the socket to 660 group runner_group after listening and re-verifies it. No probe configured: serves (kernel permissions), says so in `ping.access` and `agent status`. Probe configured: still enforced, unknown/throwing/unlisted refused.
+3. Doctor makes real checks, each with a one-line reason and an exact fix: (a) config + owners/modes, (b) real `ping` through client.js (refused/silent/malformed fails), (c) socket owner/group/mode, (d) boundary probes as the invoking identity (read credentials, list ledger, read config.json, create in AGENT_HOME and socket_dir; all must be denied; fails as the gateway uid or root), (e) peer-uid probe exercised via `peerDecision` if the gateway reports one, otherwise "kernel permissions only" and passes only if a-d passed, (f) pid taken from the answering gateway (ping) and cross-checked against the pid file, verified alive, command line `agent gateway`, uid; listeners from /proc (fds, or all listeners owned by the gateway uid when the fds are not readable) or lsof, else fail, (g), (h) as before. `agent doctor --only a,b` for diagnostics; `agent run` still runs the full doctor.
+4. Hardening. Provider body read as a stream and cancelled at `max_response_bytes` (default 8 MiB; declared content-length checked first); oversize request line closes the connection; pipelined requests while one is in flight get `busy`; `max_connections`; pid file removed on SIGTERM/SIGINT and on stop, a pid file naming a live gateway refuses startup, a stale one is replaced.
+5. Docs: group-permission boundary, Linux and macOS setup commands (for Kevin, not run), by-hand proof in order, what doctor can and cannot prove.
+
+### Interface gaps in locked code
+1. EXPECTED FAILURE, locked test `test/grant-adapter.test.js` "structural: only callModel reaches the endpoint, only dispatchTool touches the worktree, and both demand a meter" exempts only `src/builder-adapter.js`. It fails with "gateway/client.js must not reach the network" (and would for server.js). It fails only because of `node:net` in `src/gateway/server.js` and `client.js` (proxy.js uses the injected `send`, whose default is `globalThis.fetch`, and carries no flagged token). No other file under `src/` carries a flagged token (checked by grep and by the new test in `gateway-no-hardcoded-paths.test.js`). Not edited; tokens not disguised. It clears once Kevin adds his exemption for exactly those three paths.
+2. Platform gap, not locked code: Node has no peer-credential (SO_PEERCRED) reader. The peer-uid allowlist is no longer the boundary (spec decision); a probe stays an optional hook and no real probe exists.
+3. The locked run-journal schema still cannot hold run records; unchanged from the first round (gateway-owned JSONL lines, now also `request` lines).
+No other interface gap hit.
+
+### Added dependencies
+None.
+
+### Deviations from the spec / decisions where it was open
+- Doctor as the runner cannot read `config.json` (that is the point of 0700). So when `config.json` is denied, doctor takes the layout from the running gateway's `ping` (`layout`: paths, gateway uid, runner group/gid) and needs the socket path in `AGENT_GATEWAY_SOCKET`. Check (a) then says the config could not be read here and that the gateway validated it. The gateway-reported home must equal doctor's `AGENT_HOME`. This is trust in the gateway for the config contents only; owners, modes and the boundary probes are still checked by doctor itself.
+- Doctor (a): a denied stat of `AGENT_HOME` (parent not traversable) is accepted, because (d) then proves the denial; the startup check of the gateway itself verifies the exact mode.
+- Doctor (f) pid comes from `ping`, not the pid file (the runner cannot read it); both are compared when both are available. On Linux without access to the gateway's fds it falls back to every TCP listener owned by the gateway uid (stricter). On macOS lsof cannot see another user's process, so it fails closed with the remediation `sudo agent doctor --only f`.
+- Doctor (d) also fails when run as root (root ignores permissions), in addition to the gateway uid case in the spec.
+- Doctor (e) when the gateway reports a peer probe and doctor has none to exercise: fails (restrictive).
+- `socket_path` kept as an optional config key (must be directly inside `socket_dir`; default `gateway.sock`); `agent init` does not create `socket_dir` (outside AGENT_HOME; the gateway creates it at startup or Kevin does by hand).
+- Idempotency outcome is final per `request_id` including errors: a retry after an error needs a new `request_id`. Requests that fail validation before the reservation are not recorded.
+- Provider responses over the cap are settled at worst case (treated like a network error), not released.
+- Limit config keys are bounded (for example `max_connections` 1 to 256).
+- `agent status` now uses `ping` instead of a bare connect.
+
+### What the tests cannot prove
+- The real OS boundary: a different gateway user, real ownership under another uid, real group membership of the runner, root-owned directories. Tests run as one user: layouts use that user's own uid and gid, other owners and modes are checked with a fake stat, and the real boundary probes are exercised against files and directories with modes 000/555 owned by the test user. Kevin's by-hand proof (docs/gateway.md) is NOT verified by me.
+- The macOS group and user commands, and that `/var/run/agent-gateway` survives or is recreated across reboots.
+- Doctor (f) against another user's process on a real host (the lsof and /proc fallbacks for a foreign process are not exercised); the real own-process /proc or lsof path is tested.
+- Real provider behaviour (mock servers and fake streams only; no real call, no real key; the key in tests is the existing fake).
+- Behaviour under load beyond the connection cap test, and cross-process ledger lock contention beyond the existing ledger tests.
+- Timing tests use short injected timeouts (80 to 500 ms) and real sleeps; they can in principle be flaky on a very slow host.
+
+### Commands run and results (with counts)
+- Baseline origin/main 8a47113 `npm test`: 535 tests, 534 pass, 1 fail, 0 skipped on Node 22.23.5 and on Node 24.22.3; the one failure is "structural: only callModel reaches the endpoint, only dispatchTool touches the worktree, and both demand a meter" (test/grant-adapter.test.js, gap 1).
+- Final `npm test`: Node 22.23.5: 587 tests, 586 pass, 1 fail, 0 skipped. Node 24.22.3: 587 tests, 586 pass, 1 fail, 0 skipped. The one failure is the same locked structural test in both; nothing else fails.
+- `npm run build` (36 modules, 6 contracts, 6 ADRs) then `npm run check:self-model`: up to date. `npm audit --omit=dev`: 0 vulnerabilities.
+- `git diff --name-only origin/main...HEAD` touches no locked path.
+
 ## 2026-11-24 (Gateway M1a)
 ### What was done
 Branch task/gateway-m1a off origin/main 7b53dda. DESIGN_M1.md is NOT available anywhere; the task spec was the only reference. New: `src/gateway/` (config, init, store, credentials, prices, runs, proxy, api, server, client, doctor, probes, cli), `bin/agent`, `docs/gateway.md`, 7 new test files, `bin` entry in package.json, README section, self-model.json regenerated.

@@ -1,53 +1,63 @@
-import { statSync, readFileSync, readdirSync, readlinkSync, existsSync } from 'node:fs';
+import { readFileSync, readdirSync, readlinkSync, existsSync, statSync, openSync, closeSync, unlinkSync } from 'node:fs';
 import { join, resolve } from 'node:path';
-import { createHash } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import { execFile } from 'node:child_process';
 import { REPO_ROOT } from '../self-model.js';
-import { canConnect } from './client.js';
-import { peerAllowed } from './server.js';
+import { request } from './client.js';
+import { loadConfig } from './config.js';
+import { realStat } from './layout.js';
+import { resolveGroup, processInfo } from './sys.js';
 
-/**
- * Would `uid` be able to read this file by its owner/mode bits? Group membership of the runner is unknown here, so any group or
- * other read bit counts as readable (restrictive). root (uid 0) can always read. A missing file is "not readable" (nothing to leak).
- */
-export function modeAllowsRead(st, uid) {
-  if (uid === 0) return true;
-  if (st.uid === uid) return (st.mode & 0o400) !== 0;
-  return (st.mode & 0o044) !== 0;
-}
+/** What one attempt at touching a protected path came to: 'denied' (the kernel said no), 'missing', 'allowed', or 'error:<code>'. */
+const verdictOf = (e) => (e?.code === 'EACCES' || e?.code === 'EPERM' ? 'denied' : e?.code === 'ENOENT' || e?.code === 'ENOTDIR' ? 'missing' : `error:${e?.code ?? 'unknown'}`);
 
-/** Real probes. Doctor takes the same shape, so tests inject fakes for each. */
-export function realProbes() {
+/** Real probes. Doctor takes this same shape, so tests inject a fake for each. Each does the real thing as the identity running doctor. */
+export function realProbes({ pingTimeoutMs = 5000 } = {}) {
   return {
-    stat(path) { try { const s = statSync(path); return { mode: s.mode & 0o7777, uid: s.uid, gid: s.gid, isSocket: s.isSocket(), isDir: s.isDirectory() }; } catch { return null; } },
-    canRead(path, uid) { try { return modeAllowsRead(statSync(path), uid); } catch { return false; } },
-    connect: (socketPath) => canConnect(socketPath),
-    peerAllowed,
+    uid: () => (typeof process.getuid === 'function' ? process.getuid() : -1),
+    readConfig: (home) => loadConfig(home),
+    stat: realStat,
+    resolveGroup,
+    /** The real handshake over the socket (through client.js). Rejects when the server refuses, closes or stays silent. */
+    ping: (socketPath) => request(socketPath, 'ping', {}, { timeoutMs: pingTimeoutMs }),
+    tryRead(path) { try { closeSync(openSync(path, 'r')); return 'allowed'; } catch (e) { return verdictOf(e); } },
+    tryList(path) { try { readdirSync(path); return 'allowed'; } catch (e) { return verdictOf(e); } },
+    tryCreate(dir) {
+      const f = join(dir, `.doctor-probe-${process.pid}-${randomBytes(4).toString('hex')}`);
+      try { closeSync(openSync(f, 'wx', 0o600)); try { unlinkSync(f); } catch { /* best effort */ } return 'allowed'; } catch (e) { return verdictOf(e); }
+    },
     readPid(path) { try { const n = Number(readFileSync(path, 'utf8').trim()); return Number.isSafeInteger(n) && n > 0 ? n : null; } catch { return null; } },
-    /** TCP listening sockets owned by the pid: an array, or null when it cannot be determined (doctor then fails closed). */
-    tcpListeners(pid) { return tcpListeners(pid); },
+    processInfo,
+    /** TCP listening sockets of the gateway: an array, or null when they cannot be determined (doctor then fails closed). */
+    tcpListeners: (info, opts) => tcpListeners(info, opts),
+    peerDecision: null, // no real peer-uid probe exists (Node has no SO_PEERCRED); a fake-driven test supplies one
     lockedChecksum: () => lockedChecksum(REPO_ROOT),
   };
 }
 
-function tcpListeners(pid) {
-  if (existsSync('/proc/net/tcp') && existsSync(`/proc/${pid}/fd`)) {
+const parseTcpTable = (text) => text.split('\n').slice(1).map((l) => l.trim().split(/\s+/)).filter((c) => c.length > 9 && c[3] === '0A');
+
+/**
+ * Linux: read the pid's socket inodes from /proc/<pid>/fd and match them against /proc/net/tcp*. When the fds are not readable
+ * (doctor runs as another user) fall back to every listening socket owned by the gateway uid, which is stricter, never looser.
+ * Elsewhere: lsof, which only sees processes of the same user (or root); otherwise null.
+ */
+function tcpListeners(info, { gatewayUid } = {}) {
+  if (!info) return null;
+  if (existsSync('/proc/net/tcp')) {
+    const tables = ['/proc/net/tcp', '/proc/net/tcp6'].filter((f) => existsSync(f)).map((f) => parseTcpTable(readFileSync(f, 'utf8')));
     try {
       const inodes = new Set();
-      for (const fd of readdirSync(`/proc/${pid}/fd`)) { try { const l = readlinkSync(`/proc/${pid}/fd/${fd}`); const m = /^socket:\[(\d+)\]$/.exec(l); if (m) inodes.add(m[1]); } catch { /* fd closed */ } }
-      const found = [];
-      for (const f of ['/proc/net/tcp', '/proc/net/tcp6']) {
-        if (!existsSync(f)) continue;
-        for (const line of readFileSync(f, 'utf8').split('\n').slice(1)) {
-          const c = line.trim().split(/\s+/);
-          if (c.length > 9 && c[3] === '0A' && inodes.has(c[9])) found.push(c[1]);
-        }
-      }
-      return found;
-    } catch { return null; }
+      for (const fd of readdirSync(`/proc/${info.pid}/fd`)) { try { const m = /^socket:\[(\d+)\]$/.exec(readlinkSync(`/proc/${info.pid}/fd/${fd}`)); if (m) inodes.add(m[1]); } catch { /* fd closed */ } }
+      return tables.flat().filter((c) => inodes.has(c[9])).map((c) => c[1]);
+    } catch { /* cannot read another user's fds */ }
+    if (!Number.isSafeInteger(gatewayUid)) return null;
+    return tables.flat().filter((c) => Number(c[7]) === gatewayUid).map((c) => c[1]);
   }
+  const me = typeof process.getuid === 'function' ? process.getuid() : -1;
+  if (me !== 0 && info.uid !== me) return null; // lsof would show nothing for another user's process; that is not "no listeners"
   return new Promise((res) => {
-    execFile('lsof', ['-nP', '-a', '-p', String(pid), '-iTCP', '-sTCP:LISTEN', '-Fn'], { timeout: 5000 }, (err, out) => {
+    execFile('lsof', ['-nP', '-a', '-p', String(info.pid), '-iTCP', '-sTCP:LISTEN', '-Fn'], { timeout: 5000 }, (err, out) => {
       if (err && err.code !== 1) return res(null); // lsof exits 1 when nothing matches
       res(String(out).split('\n').filter((l) => l.startsWith('n')));
     });

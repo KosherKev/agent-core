@@ -32,3 +32,17 @@ test('src/gateway does not import from or write to locked paths (it only imports
     for (const m of t.matchAll(/from '(\.\.\/(?:grant|ledger)\/[^']*)'/g)) assert.match(m[1], /\/index\.js$/, `${f} imports ${m[1]}`);
   }
 });
+
+test('network tokens (fetch(, node:net, node:http(s), WebSocket, XMLHttpRequest) appear only in server.js, client.js and proxy.js', () => {
+  const banned = /\bfetch\s*\(|fetchFn|node:https?|node:net|XMLHttpRequest|WebSocket/;
+  const allowed = new Set(['server.js', 'client.js', 'proxy.js']);
+  const here = files(join(root, 'src', 'gateway')); const bin = files(join(root, 'bin'));
+  for (const f of [...here, ...bin]) {
+    const name = f.split('/').pop();
+    if (allowed.has(name) && f.includes('/src/gateway/')) continue;
+    assert.ok(!banned.test(readFileSync(f, 'utf8')), `${f} must not carry a network token (only server.js, client.js and proxy.js may)`);
+  }
+  // the three allowed files really are the ones that use the network
+  assert.match(readFileSync(join(root, 'src', 'gateway', 'server.js'), 'utf8'), /node:net/);
+  assert.match(readFileSync(join(root, 'src', 'gateway', 'client.js'), 'utf8'), /node:net/);
+});

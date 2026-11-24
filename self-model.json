@@ -84,6 +84,10 @@
       "path": "src/gateway/init.js"
     },
     {
+      "name": "gateway/layout",
+      "path": "src/gateway/layout.js"
+    },
+    {
       "name": "gateway/prices",
       "path": "src/gateway/prices.js"
     },
@@ -106,6 +110,10 @@
     {
       "name": "gateway/store",
       "path": "src/gateway/store.js"
+    },
+    {
+      "name": "gateway/sys",
+      "path": "src/gateway/sys.js"
     },
     {
       "name": "grant/expiry",

@@ -58,7 +58,7 @@ Add `schemas/v2/` alongside `v1/`; never change a published version in a breakin
 - Until `main` exists with the guard on it, the check has no base to run from.
 
 ## Gateway (M1a)
-`src/gateway/` and `bin/agent`: a Unix-socket gateway that holds the ledger, grant engine and provider credentials, proxies model calls (free models only) and ships `agent doctor`. See `docs/gateway.md`.
+`src/gateway/` and `bin/agent`: a Unix-socket gateway that holds the ledger, grant engine and provider credentials, proxies model calls (free models only) and ships `agent doctor`. Access is enforced by file permissions (the socket is group-owned by the runner group; AGENT_HOME is 0700 and unreachable to the runner), and `agent doctor`, run as the runner user, proves it with real probes. `modelCall` needs a `request_id` and is idempotent per run. See `docs/gateway.md` for setup commands and the by-hand proof.
 
 ## OpenRouter builder adapter
 `src/builder-*.js` lets the contract drive an OpenAI-compatible model (default `particle-ai/particle-1:free` via OpenRouter) as a BUILDER only (R2: `role` accepts only `builder`; `overseer` and unknown roles are rejected at config load).
