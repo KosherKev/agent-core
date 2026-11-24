@@ -1,5 +1,40 @@
 # LOG
 
+## 2026-11-24 (Gateway M1a)
+### What was done
+Branch task/gateway-m1a off origin/main 7b53dda. DESIGN_M1.md is NOT available anywhere; the task spec was the only reference. New: `src/gateway/` (config, init, store, credentials, prices, runs, proxy, api, server, client, doctor, probes, cli), `bin/agent`, `docs/gateway.md`, 7 new test files, `bin` entry in package.json, README section, self-model.json regenerated.
+
+### Interface gaps in locked code
+1. **BLOCKER, locked test fails: `test/grant-adapter.test.js` "structural: only callModel reaches the endpoint..."** (locked). It greps EVERY file under `src/` for `fetch(`, `fetchFn`, `node:net`, `node:http(s)`, `WebSocket` and fails if any file other than `src/builder-adapter.js` has them. The gateway necessarily uses a Unix-socket module (`src/gateway/server.js`, `client.js`) and an HTTP client call for the provider proxy (`src/gateway/proxy.js`). I did NOT edit the test and did NOT disguise the tokens to slip past it (that would defeat what the test guards). Result: 1 failing test, 534 of 535 pass. Options for Kevin: (a) edit that locked test by hand to exempt `src/gateway/`, (b) move the gateway outside `src/` (the test then stays meaningful for the builder; the self-model would stop indexing it and `src/gateway/` in the spec/locking steps would change).
+2. Run journal schema (`schemas/v1/run-journal-entry.schema.json`, `unevaluatedProperties:false`, three kinds) cannot hold start/end/duration/model/provider/outcome/`capability_added`. Run records are gateway-owned JSONL lines (`runs/<run>.jsonl`); ordinary journal entries are validated against the unchanged schema and stored in the same file. Journal API itself (`src/journal.js`) is in-memory only, so it is not used.
+3. `config/prices.json` format and `src/grant/prices.js`: keyed by model id only. The gateway keys by provider AND model by giving the meter the composite id `provider|model` (a `:free` suffix keeps the free rule). A bare-model key in the file never matches and doctor check (g) reports it. File untouched and empty.
+4. The meter accepts a usage object from whoever calls `settle`; the gateway therefore never forwards runner-supplied usage (paid reservation settles at worst case, free at 0). Only `modelCall` supplies measured usage.
+5. Ledger `openRun` is the only registration call and `remaining(grant)` is the read; the store interface maps `append`->`openRun`, `read`->`remaining`, `lock`->`acquireLock`, `report`->`buildReport`. A crashed gateway leaves in-memory meters lost; the ledger keeps open reservations counted (conservative), and those runs cannot be resumed (`run_not_open`).
+6. Platform gap (not locked code): Node exposes no SO_PEERCRED. The default peer-uid probe returns unknown and the server refuses every connection; a real probe must be injected before the gateway can serve a runner. Doctor (b) only proves a connection can be opened.
+
+### Added dependencies
+None.
+
+### Deviations from the spec
+- Added `agent gateway` (starts the gateway); the spec lists no way to start it and the by-hand proof needs one.
+- `bin` entry added to package.json (not a locked path).
+- `settle` ignores caller usage (see gap 4); spec item 5 says cost is measured by the gateway.
+- Doctor (e) is a pure simulation (the same exact-uid decision function the server uses, applied to the allowlist minus the runner), per the spec's "simulated".
+- Doctor (d) treats any group/other read bit as readable (runner group membership is unknown) and a missing file as a failure.
+- Doctor (h) checksum is sha256 over the file names and bytes of every path in `.github/locked-paths.txt`.
+- `test/grant-adapter.test.js` failing (gap 1): the spec's "all existing tests still green" is NOT met.
+
+### What the tests cannot prove
+- The real OS boundary: different uid, real file ownership/modes under another user, that the runner cannot read credential and ledger files, real SO_PEERCRED peer checks, real TCP listener detection (fakes in tests; `lsof` or `/proc` used for real). Kevin's by-hand proof (docs/gateway.md) is NOT verified by me.
+- Real provider behaviour (mock server only; no real call, no real key). Mock key is the existing FAKE_KEY.
+- Gateway restart semantics under load, concurrent connections, and ledger lock contention across processes beyond the existing ledger tests.
+
+### Commands run and results (with counts)
+- Baseline origin/main 7b53dda `npm test`: 470 tests, 470 pass, 0 fail, 0 skipped on Node 22.23.5 and on Node 24.22.3.
+- Final `npm test`: 535 tests, 534 pass, 1 fail (the locked structural test above), 0 skipped on Node 22.23.5 and on Node 24.22.3 (+65 new tests, all passing).
+- `npm run build` (34 modules, 6 contracts, 6 ADRs) then `npm run check:self-model`: up to date. `npm audit --omit=dev`: 0 vulnerabilities.
+- The by-hand boundary proof is NOT verified by me.
+
 ## 2026-11-23 (Contract gap follow-ups)
 ### What was done
 Branch task/contract-gap-followups off origin/main 6f6837c (merge of task/contract-gaps; task-spec schema and `issue_kind` confirmed present). One commit per issue.
