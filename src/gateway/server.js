@@ -1,0 +1,71 @@
+import net from 'node:net';
+import { existsSync, lstatSync, unlinkSync, chmodSync, writeFileSync } from 'node:fs';
+import { dirname } from 'node:path';
+import { mkdirSync } from 'node:fs';
+
+export const MAX_LINE = 1024 * 1024;
+
+/** Pure peer decision, shared with doctor check (e). Fail closed: anything but a listed integer uid is refused. */
+export function peerAllowed(allowlist, uid) {
+  return Number.isSafeInteger(uid) && Array.isArray(allowlist) && allowlist.includes(uid);
+}
+
+/**
+ * Node exposes no SO_PEERCRED, so there is no portable built-in way to read a peer's uid. The default probe therefore returns
+ * null (unknown) and the server refuses every connection until a real probe is injected. Fail closed. Recorded as an interface gap.
+ */
+export const unknownPeerUid = () => null;
+
+/**
+ * Unix-socket JSON-lines server (one JSON request per line, one response per line). No TCP listener exists in this module:
+ * it only ever calls listen(path). For each connection the peer uid is resolved and checked against the allowlist BEFORE any
+ * data listener is attached or any byte is read, so an unlisted peer's bytes are never parsed.
+ */
+export function createGatewayServer({ api, config, getPeerUid = unknownPeerUid, log = () => {}, idleMs = 30_000 }) {
+  const server = net.createServer({ allowHalfOpen: false, pauseOnConnect: true }, (socket) => {
+    (async () => {
+      let uid;
+      try { uid = await getPeerUid(socket); } catch { uid = null; }
+      if (!peerAllowed(config.allowed_peer_uids, uid)) { log('connection refused: peer not allowlisted'); socket.destroy(); return; }
+      socket.setTimeout(idleMs, () => socket.destroy());
+      let buf = ''; let chain = Promise.resolve();
+      socket.setEncoding('utf8');
+      socket.on('error', () => socket.destroy());
+      socket.on('data', (chunk) => {
+        buf += chunk;
+        if (buf.length > MAX_LINE) { socket.destroy(); return; }
+        let nl;
+        while ((nl = buf.indexOf('\n')) >= 0) {
+          const line = buf.slice(0, nl); buf = buf.slice(nl + 1);
+          chain = chain.then(async () => {
+            let req;
+            try { req = JSON.parse(line); } catch { req = null; }
+            const res = req === null ? { id: null, ok: false, error: { code: 'invalid_request', message: 'request is not valid JSON' } } : await api.handle(req);
+            if (!socket.destroyed) socket.write(JSON.stringify(res) + '\n');
+          });
+        }
+      });
+      socket.resume();
+    })().catch(() => socket.destroy());
+  });
+
+  return Object.freeze({
+    server,
+    async start() {
+      const p = config.socket_path;
+      mkdirSync(dirname(p), { recursive: true, mode: 0o700 });
+      if (existsSync(p)) {
+        if (!lstatSync(p).isSocket()) throw new Error('socket path exists and is not a socket; refusing');
+        const live = await new Promise((res) => { const c = net.connect(p); c.once('connect', () => { c.destroy(); res(true); }); c.once('error', () => res(false)); });
+        if (live) throw new Error('a gateway is already listening on this socket; refusing');
+        unlinkSync(p);
+      }
+      const prev = process.umask(0o177); // the socket is created 0600 from the start, no window
+      try { await new Promise((res, rej) => { server.once('error', rej); server.listen(p, () => { server.off('error', rej); res(); }); }); } finally { process.umask(prev); }
+      chmodSync(p, 0o600);
+      writeFileSync(config.pid_file, `${process.pid}\n`, { mode: 0o600 });
+      log('gateway listening on unix socket');
+    },
+    stop: () => new Promise((res) => { server.close(() => res()); server.closeAllConnections?.(); }),
+  });
+}
