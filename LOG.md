@@ -23,7 +23,7 @@ The round 3 reviewer findings were given to me second hand; each was checked in 
 
 ### Verification
 - Locked paths: `git diff --name-only origin/main...HEAD` lists only src/gateway/*, docs/gateway.md, LOG.md and test/gateway-*.test.js. No change under src/grant/, src/ledger/, src/builder-*.js, acceptance/, .github/, config/, test/grant-adapter.test.js. README.md not touched (it quotes none of the changed text). No new dependency. No new banned token (the suite's allowlist test passes unmodified).
-- Commands and counts: see the final report and the commit messages; numbers are filled in below.
+- `npm test`: Node 22.23.5 659 tests, 659 pass, 0 fail, 0 skipped; Node 24.22.3 659 tests, 659 pass, 0 fail, 0 skipped (baseline 643, +16 new). `npm run check:self-model`: up to date (no regeneration needed). `npm audit --omit=dev`: 0 vulnerabilities.
 
 ### Open questions for Kevin
 - Item 1 flushes only the start line. Should the outcome line and `request_reserved` be flushed too? Skipped because losing either is safe today (retry says outcome unknown), but a paid model may want a different answer.
