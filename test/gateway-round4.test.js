@@ -31,8 +31,9 @@ async function okTransport() { return new Response(JSON.stringify(chatOk('ok').b
 // ---- item 1: the request_start line is flushed before the provider is called ----
 test('item 1: the provider is not called when the file sync fails, and the error is its own code', async () => {
   const t = tempHome();
-  const { api, hits } = build(t, { runsOpts: { fileSync: { file: () => { throw new Error('EIO'); }, dir: () => {} } } });
-  await call(api, 'openRun', { run_id: 'r1', grant: makeGrant() });
+  let fail = false; // the run opens normally (its start is flushed); the sync breaks afterwards
+  const { api, hits } = build(t, { runsOpts: { fileSync: { file: () => { if (fail) throw new Error('EIO'); }, dir: () => {} } } });
+  assert.equal((await call(api, 'openRun', { run_id: 'r1', grant: makeGrant() })).ok, true); fail = true;
   const r = await call(api, 'modelCall', { ...req, request_id: 'q1' });
   assert.equal(r.ok, false); assert.equal(r.error.code, 'request_start_not_durable');
   assert.equal(hits.length, 0, 'the provider must not be called');
@@ -47,8 +48,9 @@ test('item 1: a rejected (async) file sync and a failing directory sync both fai
   // a brand new file, so the directory sync is exercised
   await assert.rejects(() => createRunStore(t.config.runs_dir, { fileSync: bad }).recordRequestStart('fresh', 'q', 'fp'), /could not be flushed/);
   await assert.rejects(() => createRunStore(t.config.runs_dir, { fileSync: { file: async () => { throw new Error('EIO'); }, dir: () => {} } }).recordRequestStart('fresh2', 'q', 'fp'), /could not be flushed/);
-  const { api, hits } = build(t, { runsOpts: { fileSync: { file: async () => { throw new Error('EIO'); }, dir: () => {} } } });
-  await call(api, 'openRun', { run_id: 'r2', grant: makeGrant() });
+  let fail = false;
+  const { api, hits } = build(t, { runsOpts: { fileSync: { file: async () => { if (fail) throw new Error('EIO'); }, dir: () => {} } } });
+  assert.equal((await call(api, 'openRun', { run_id: 'r2', grant: makeGrant() })).ok, true); fail = true;
   const r = await call(api, 'modelCall', { ...req, run_id: 'r2', request_id: 'q1' });
   assert.equal(r.ok, false); assert.equal(r.error.code, 'request_start_not_durable'); assert.equal(hits.length, 0);
 });
@@ -57,16 +59,17 @@ test('item 1: the provider is not called before the sync resolves, and is called
   const t = tempHome();
   let release; const gate = new Promise((res) => { release = res; });
   const calls = [];
-  const fileSync = { file: async (fd) => { calls.push('file'); await gate; calls.push('file-resolved'); }, dir: () => { calls.push('dir'); } };
+  let armed = false;
+  const fileSync = { file: async (fd) => { if (!armed) return; calls.push('file'); await gate; calls.push('file-resolved'); }, dir: () => {} };
   const { api, hits } = build(t, { runsOpts: { fileSync } });
-  await call(api, 'openRun', { run_id: 'r1', grant: makeGrant() });
+  await call(api, 'openRun', { run_id: 'r1', grant: makeGrant() }); armed = true;
   const pending = call(api, 'modelCall', { ...req, request_id: 'q1' });
   await new Promise((r) => setTimeout(r, 100));
   assert.deepEqual(calls, ['file']); assert.equal(hits.length, 0, 'still waiting for the sync: the provider has not been called');
   release();
   const r = await pending;
   assert.equal(r.ok, true, JSON.stringify(r)); assert.equal(hits.length, 1);
-  assert.deepEqual(calls, ['file', 'file-resolved']);
+  assert.deepEqual(calls, ['file', 'file-resolved', 'file', 'file-resolved']); // the start line, then the reservation line, each flushed
 });
 
 test('item 1: the directory is flushed only when the write created the run file', async () => {
@@ -124,7 +127,7 @@ import { validateConfig, LIMITS } from '../src/gateway/config.js';
 test('item 6c: run_file_max_bytes is a validated config limit with a default', () => {
   const t = tempHome();
   assert.equal(t.config.run_file_max_bytes, LIMITS.run_file_max_bytes[0]);
-  for (const bad of [0, 1023, -1, 1.5, '4096', 1024 * 1024 * 1024 + 1]) assert.equal(validateConfig({ ...t.raw, run_file_max_bytes: bad }, t.home).valid, false, String(bad));
+  for (const bad of [0, 1023, -1, 1.5, '4096', 256 * 1024 * 1024 + 1, 1024 * 1024 * 1024]) assert.equal(validateConfig({ ...t.raw, run_file_max_bytes: bad }, t.home).valid, false, String(bad));
   const ok = validateConfig({ ...t.raw, run_file_max_bytes: 4096 }, t.home);
   assert.equal(ok.valid, true); assert.equal(ok.config.run_file_max_bytes, 4096);
 });

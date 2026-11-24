@@ -454,7 +454,7 @@ test('round 4 item 6a: findSymlinkComponent walks every component with lstat; on
   assert.equal(findSymlinkComponent('/var/run/x', { lstat: mk(0), readlink: rl, platform: 'linux' }).link, '/var');
   assert.equal(findSymlinkComponent('/var/run/x', { lstat: mk(501), readlink: rl, platform: 'darwin' }).link, '/var');
   assert.equal(findSymlinkComponent('/var/run/x', { lstat: mk(0), readlink: () => '/tmp/evil', platform: 'darwin' }).link, '/var');
-  assert.deepEqual(Object.keys(SYSTEM_SYMLINKS), ['darwin']); assert.deepEqual(Object.keys(SYSTEM_SYMLINKS.darwin), ['/var', '/tmp', '/etc']);
+  assert.deepEqual(Object.keys(SYSTEM_SYMLINKS), ['darwin']); assert.deepEqual(Object.keys(SYSTEM_SYMLINKS.darwin), ['/var']);
 });
 
 // ---- round 4 item 6b: nothing is sent to the socket until the filesystem trust checks have passed ----

@@ -77,9 +77,14 @@ export function createGatewayApi({ config, store, runs, credentials, priceTable,
   const fpOf = (p) => createHash('sha256').update(JSON.stringify([p.provider, p.model, p.messages, p.max_tokens ?? null])).digest('hex');
   const pending = new Set(); // promises of detached modelCall work (the call and the persisting of its outcome)
 
+  const durabilityError = (e, what) => new RequestError('request_start_not_durable', e instanceof DurabilityError ? `${what}; the provider was not called (fail closed); use a new request_id to try again` : `${what.replace('made durable on disk', 'recorded')}; the provider was not called (fail closed); use a new request_id to try again`);
   const callModel = async (r, p) => {
     const res = doReserve(r, { provider: p.provider, model: p.model, input: p.messages, max_tokens: p.max_tokens });
-    try { runs.recordRequestReserved(p.run_id, p.request_id, res.id); } catch { /* best effort: without the line a retry says no reservation is recorded, which is what the file then shows */ }
+    // The reservation line is flushed BEFORE the provider is called. If it cannot be, nothing was sent anywhere yet: release the reservation and fail closed.
+    try { await runs.recordRequestReserved(p.run_id, p.request_id, res.id); } catch (e) {
+      r.reservations.delete(res.id); try { r.meter.release(res, 'durability'); } catch { /* conservative: the reservation stays counted */ }
+      throw durabilityError(e, 'the reservation of this request could not be made durable on disk');
+    }
     let out;
     try { out = await callProvider({ config, credentials, provider: p.provider, model: p.model, messages: p.messages, maxTokens: res.max_tokens, send: transport, timeoutMs: config.provider_timeout_ms, maxBytes: config.max_response_bytes }); } catch (e) { r.reservations.delete(res.id); r.meter.release(res, 'proxy'); throw e; }
     r.reservations.delete(res.id);
@@ -107,7 +112,7 @@ export function createGatewayApi({ config, store, runs, credentials, priceTable,
       const meter = createMeter(p.grant, { now, priceTable, model, ledger: store.meterLedger(), runId: p.run_id, ...(makeSink ? { sink: makeSink(p.run_id) } : {}) });
       const r = { meter, reservations: new Map(), inflight: 0 };
       open.set(p.run_id, r);
-      try { runs.start(p.run_id, { provider: p.provider, model: p.model }); } catch (e) { open.delete(p.run_id); try { meter.end('failed'); } catch { /* conservative: reservations stay counted */ } throw e; }
+      try { await runs.start(p.run_id, { provider: p.provider, model: p.model }); } catch (e) { open.delete(p.run_id); try { meter.end('failed'); } catch { /* conservative: reservations stay counted */ } throw e instanceof DurabilityError ? new RequestError('request_start_not_durable', 'the run record could not be made durable on disk; the run was not opened (fail closed); use a new run_id to try again') : e; }
       return { result: { run_id: p.run_id }, run: r };
     },
     async endRun(p) {
@@ -184,7 +189,7 @@ export function createGatewayApi({ config, store, runs, credentials, priceTable,
         // The start line goes down, flushed to disk, BEFORE anything is reserved or the provider is called, so a call cut off by a stop or a power loss is recognisable after a restart.
         // If it cannot be written or flushed, nothing is reserved and the provider is never called (fail closed, with its own error code).
         try {
-          try { await runs.recordRequestStart(p.run_id, p.request_id, fp); } catch (e) { throw new RequestError('request_start_not_durable', e instanceof DurabilityError ? 'the start of this request could not be made durable on disk; the provider was not called (fail closed); use a new request_id to try again' : 'the start of this request could not be recorded; the provider was not called (fail closed); use a new request_id to try again'); }
+          try { await runs.recordRequestStart(p.run_id, p.request_id, fp); } catch (e) { throw durabilityError(e, 'the start of this request could not be made durable on disk'); }
           o = { result: await callModel(r, p) };
         } catch (err) { o = { err }; }
         try {

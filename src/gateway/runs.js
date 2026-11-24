@@ -31,15 +31,24 @@ export function createRunStore(dir, { now = Date.now, fileSync = realFileSync, m
   const st = lstatSync(dir);
   if (st.isSymbolicLink() || !st.isDirectory()) throw new Error('runs directory is not a plain directory; refusing');
   const fileOf = (runId) => { if (typeof runId !== 'string' || !RUN_ID.test(runId)) throw new RangeError('run id is missing or malformed'); return join(dir, `${runId.replace(/:/g, '_')}.jsonl`); };
-  const write = (runId, line) => appendFileSync(fileOf(runId), JSON.stringify({ at: new Date(now()).toISOString(), ...line }) + '\n', { flag: 'a', mode: 0o600 });
-  /** Append one line, then make it durable BEFORE returning: fsync the file, and the directory too when this write created the file. Rejects with DurabilityError if any flush fails. */
+  // Run files this store created whose directory entry has not been flushed yet. The next durable write for such a file flushes the directory once.
+  const dirPending = new Set();
+  const write = (runId, line) => {
+    const f = fileOf(runId);
+    if (!existsSync(f)) dirPending.add(f);
+    appendFileSync(f, JSON.stringify({ at: new Date(now()).toISOString(), ...line }) + '\n', { flag: 'a', mode: 0o600 });
+  };
+  /**
+   * Append one line, then make it durable BEFORE returning: fsync the file (everything in it so far), and the directory too the first time, i.e. when this
+   * write created the file or the file was created by an earlier non-durable write of this store. Rejects with DurabilityError if any flush fails.
+   */
   const writeDurable = async (runId, line) => {
     const f = fileOf(runId);
-    const created = !existsSync(f);
+    if (!existsSync(f)) dirPending.add(f);
     const fd = openSync(f, 'a', 0o600);
     try {
       writeSync(fd, JSON.stringify({ at: new Date(now()).toISOString(), ...line }) + '\n');
-      try { await fileSync.file(fd); if (created) await fileSync.dir(dir); } catch { throw new DurabilityError('the run record could not be flushed to disk'); }
+      try { await fileSync.file(fd); if (dirPending.has(f)) { await fileSync.dir(dir); dirPending.delete(f); } } catch { throw new DurabilityError('the run record could not be flushed to disk'); }
     } finally { closeSync(fd); }
   };
   // Every re-read of a run file (a retry lookup, a duplicate-id check, the assembled view) goes through here. The size is checked on the open file BEFORE anything is read.
@@ -56,7 +65,8 @@ export function createRunStore(dir, { now = Date.now, fileSync = realFileSync, m
 
   const api = {
     exists: (runId) => existsSync(fileOf(runId)),
-    start(runId, { provider, model } = {}) { write(runId, { type: 'run_start', start_ms: now(), ...(provider ? { provider } : {}), ...(model ? { model } : {}) }); },
+    /** Creates the run file. Async and durable: resolves only after the file's contents and its directory entry are flushed. Rejects with DurabilityError otherwise. */
+    start(runId, { provider, model } = {}) { return writeDurable(runId, { type: 'run_start', start_ms: now(), ...(provider ? { provider } : {}), ...(model ? { model } : {}) }); },
     setModel(runId, provider, model) { write(runId, { type: 'model', provider, model }); },
     /** One line per finished modelCall: the request_id, its parameter fingerprint and how it ended, with the (already redacted) result so a retry can be answered after the memory cache forgot it. */
     recordRequest(runId, requestId, { ok, code, cost_micro, fp, result, message } = {}) {
@@ -67,8 +77,8 @@ export function createRunStore(dir, { now = Date.now, fileSync = realFileSync, m
      * and nothing is paid twice. Async and durable: it resolves only after the line is flushed (file, and directory if this write created the file). Rejects with DurabilityError otherwise.
      */
     recordRequestStart(runId, requestId, fp) { return writeDurable(runId, { type: 'request_start', request_id: requestId, fp }); },
-    /** Best effort (not flushed): a reservation now exists for this request_id. Lets a retry say truthfully whether a reservation was recorded. */
-    recordRequestReserved(runId, requestId, reservationId) { write(runId, { type: 'request_reserved', request_id: requestId, ...(typeof reservationId === 'string' ? { reservation_id: reservationId.slice(0, 100) } : {}) }); },
+    /** Async and durable (flushed before it resolves): a reservation now exists for this request_id. Lets a retry say truthfully whether a reservation was recorded. Rejects with DurabilityError if the flush fails. */
+    recordRequestReserved(runId, requestId, reservationId) { return writeDurable(runId, { type: 'request_reserved', request_id: requestId, ...(typeof reservationId === 'string' ? { reservation_id: reservationId.slice(0, 100) } : {}) }); },
     /**
      * The last recorded outcome for a request_id on this run (the durable fallback behind the gateway's bounded memory cache), or null. Throws if the file is unreadable.
      * A finished call is its 'request' line. A call that was started but never finished comes back as its start line with `pending: true` (the outcome is unknown) and `reserved: true` only if the file also holds a reservation line for it.

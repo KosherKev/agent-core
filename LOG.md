@@ -1,5 +1,32 @@
 # LOG
 
+## 2026-11-24 (Gateway round 5: durable run file, durable reservation line, review leftovers)
+Branch task/gateway-round-5, based on origin/main 82ba650 (round 4 merge). Baseline before my change was 659 tests (round 4's own count); after: 665 on Node 22.23.5 and 24.22.3.
+The reviewers' claims reached me second hand; each was checked in the code, and what I found is stated per item.
+
+### Per item
+1. DONE, verified in code: finding true. `runs.start()` used `appendFileSync` with no flush, so the run file (and its `run_start` line) was never flushed or directory-synced by anything before `request_start`; and round 4's directory flush fired only when the `request_start` write itself created the file, which it never did in a real flow. Now `runs.start()` is async and durable (write, fsync file, fsync directory) using the same injectable `fileSync`, and `openRun` awaits it. Any other non-durable write that creates a run file marks it, and the next durable write flushes the directory once (a per-store set, `dirPending`). Failure: `openRun` fails with `request_start_not_durable` (the run is not opened; a partial file may remain, so the run id is used up: use a new run_id). Tests: `test/gateway-round5.test.js` (open flushes file then dir; the side-path file gets its directory flushed once). Three round 4 tests had to change because a failing or gated sync now also stops `openRun`: they now break or gate the sync only after the run is open.
+2. DONE, verified in code. Ordering is now: `request_start` flushed, then `doReserve`, then `request_reserved` flushed, then the provider. Before: `request_reserved` was a best-effort unflushed write. Is a second reservation possible when `request_reserved` is lost? No: `findRequest` returns the `request_start` line as `pending`, and `outcomeOf` answers `request_outcome_unknown` without reserving or calling the provider (api.js, the retry path before `callModel`). So the existing design already blocks a double spend if the start line is durable; the flush of `request_reserved` is kept as asked, and only makes the retry message accurate. The real hole was the start line not being durable (item 1). Failure of the reserved-line flush: the reservation is released (nothing was sent) and the call fails with `request_start_not_durable`; edge case: if that failure were followed by a failure to record the outcome line too, a later retry would read "its reservation is kept" although it was released. Tests: one order test (run_start sync, dir, request_start sync, reserve, request_reserved sync, provider) and one test failing each of four steps: the provider is never called.
+3. DONE, verified in code: `LIMITS.run_file_max_bytes` upper bound 1 GiB to 256 MiB; a value above it gets its own message naming the ceiling and why. Default (64 MiB) unchanged, documented in docs/gateway.md as a judgement, not a measurement. I did not measure the JS string limit myself; 256 MiB is the spec's number and sits well under V8's ~512 MB (taken from the spec). Test: boundary values and message.
+4. DONE, verified in code: `SYSTEM_SYMLINKS.darwin` is now `/var` only. Checked what else could need `/tmp` or `/etc`: the symlink walk only runs over AGENT_HOME, socket_dir, the socket and the discovery file; the only `/etc` uses in src/gateway are file reads (`/etc/group`, `/etc/passwd`) that do not pass through it, and `/tmp` appears only in the docs' manual steps as a scratch file, not a trust path. Tests: key list is exactly `/var`; `/tmp` and `/etc` links are refused on darwin (test updated in gateway-doctor.test.js, new one in round5).
+5. DONE (spec item 5): the test already half existed (a file with broken JSON gave exit 1) but not a file that parses and fails validation. Added: unknown key, a limit over the new ceiling, and a wrong config_version each print `config: INVALID` and exit non-zero; the denied case still exits 0.
+6. DONE (spec item 6): docs/gateway.md says Linux is the target, macOS fsync is weaker (no `F_FULLFSYNC`), no power-loss test has been run on any machine. Also updated the symlink and `run_file_max_bytes` text.
+7. This file. Nothing skipped.
+
+### What the spec got wrong or left open
+- Item numbering: the "task" section skips the 5th research finding's number; I used the task's numbering above.
+- The spec said the dir sync happens "once per run file on first creation by any other path"; a non-durable write cannot itself wait for a flush, so the directory is flushed by the next durable write for that file. In the gateway every run file is created by `start()`, so this is a safety net.
+- `agent status` finding 6 was partly covered already (see item 5).
+- Not done and not asked: `F_FULLFSYNC` on macOS (no portable Node API without a native addon or a new dependency).
+
+### Verification
+- Locked paths: only src/gateway/*, docs/gateway.md, LOG.md and test/gateway-*.test.js changed. No new dependency, no new banned token, README.md not touched (it quotes none of this).
+- `npm test`: Node 22.23.5 665 tests, 665 pass, 0 fail, 0 skipped; Node 24.22.3 665 tests, 665 pass, 0 fail, 0 skipped. `npm run check:self-model`: up to date on both (no regeneration). `npm audit --omit=dev`: 0 vulnerabilities on both.
+
+### Open questions for Kevin
+- Should the outcome line (`request`) also be flushed? Losing it is safe today (retry says outcome unknown, never re-runs), but a paid model may want the answer kept.
+- Run the power-loss and Linux boundary proofs by hand; nothing here proves crash-safety.
+
 ## 2026-11-24 (Gateway round 4: durable request_start, remaining doctor lows, status exit code)
 Branch task/gateway-round-4, based on origin/main 38c4170. Baseline `npm test` on Node 24.22.3 after `npm ci`: 643/643. After: 659/659 (see Verification).
 The round 3 reviewer findings were given to me second hand; each was checked in the code, and what I found is stated per item.

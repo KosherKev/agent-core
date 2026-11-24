@@ -16,12 +16,12 @@ export function realStat(path) {
 
 /**
  * The platform's well-known root-level system symlinks that are allowed on a trust path. ONLY these, ONLY at the top of the filesystem,
- * ONLY when the link is owned by root and points exactly at the listed target. macOS keeps /var, /tmp and /etc under /private; /var is
+ * ONLY when the link is owned by root and points exactly at the listed target. macOS keeps /var (and /tmp, /etc) under /private; only /var is
  * needed (the default socket_dir is /var/run/agent-gateway and temp dirs live under /var/folders). Linux has none: any symlink fails.
  * Stricter alternative considered and rejected: requiring the configured path to equal its realpath would refuse every /var/... path on
  * macOS, including the documented setup, so the explicit list is the strictest option that still works.
  */
-export const SYSTEM_SYMLINKS = Object.freeze({ darwin: Object.freeze({ '/var': 'private/var', '/tmp': 'private/tmp', '/etc': 'private/etc' }) });
+export const SYSTEM_SYMLINKS = Object.freeze({ darwin: Object.freeze({ '/var': 'private/var' }) });
 
 /**
  * Walk every component of an absolute path from the filesystem root with lstat (never following) and report the first symbolic link
