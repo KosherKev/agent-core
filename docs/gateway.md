@@ -68,6 +68,16 @@ sudo install -d -o _agentgw -g staff -m 0755 /var/agentgw
 sudo install -d -o _agentgw -m 0700 /var/agentgw/agent-home
 ```
 
+### Install the audited copy (as root, once)
+The runner user must not be able to edit gateway code, so install it root-owned, pinned to a commit, with no dependency install scripts run as root. `npm ci --omit=dev` alone would run those scripts as root.
+```sh
+sudo git clone <repo-url> /opt/agent-core                 # root-owned location
+sudo git -C /opt/agent-core checkout <sha>                # the commit you audited
+sudo git -C /opt/agent-core rev-parse HEAD                # record this sha; it is the audited commit
+cd /opt/agent-core && sudo npm ci --omit=dev --ignore-scripts
+```
+Run the CLI by full path everywhere (`node /opt/agent-core/bin/agent ...`) so PATH and shebangs do not matter. Commands below that say `agent` mean this.
+
 ### Both
 1. As the gateway user create the config under its `AGENT_HOME`: `sudo -u agentgw env AGENT_HOME=<agent-home> agent init`, then edit `config.json` as that user: real `identities.gateway_uid` / `runner_uid`, `socket_dir`, `runner_group`, and the provider (`providers.<name>.base_url`).
 2. As the gateway user write the credential file (`credentials.json`, mode 0600, `{ "providers": { "<name>": "<key>" } }`). Never put a key anywhere else.
@@ -78,9 +88,18 @@ sudo install -d -o _agentgw -m 0700 /var/agentgw/agent-home
 2. Start the gateway as the gateway user. It must print `gateway running`. If it refuses with `layout refused`, fix exactly what it names.
 3. As the gateway user: `ls -ld <agent-home> <socket_dir>` and `ls -l <socket_dir>`. Expect `drwx------ agentgw` (home), `drwxr-x--- agentgw agent-runner` (socket_dir), `srw-rw---- agentgw agent-runner` (socket).
 4. As your normal user, by hand: `cat <agent-home>/credentials.json`, `ls <agent-home>/ledger`, `cat <agent-home>/config.json`, `touch <agent-home>/x`, `touch <socket_dir>/x`. Every one must say `Permission denied`.
-5. As your normal user: `export AGENT_GATEWAY_SOCKET=<socket_dir>/gateway.sock` then `agent doctor --gateway-user agentgw` (use your gateway user's name). `config.json` is unreadable to you, so doctor learns the layout from the gateway's `ping`, but it checks who the gateway is against the name YOU typed, never against the environment. Without `--gateway-user` the trust checks are refused. All eight checks must pass: (a) config and owners/modes, (b) real `ping`, (c) socket owner/group/mode, (d) boundary probes all denied, (e) kernel-permissions only, (f) no TCP listener, (g) price table, (h) locked-set checksum (record it). On macOS, (f) cannot see another user's process: run `sudo agent doctor --gateway-user <name> --only f` once. `--only` always prints `PARTIAL: N of M checks run`, never "all checks passed", and exits non-zero if any selected check fails; `agent run` still needs the FULL doctor.
-6. Negative checks: `sudo chmod 755 <agent-home>` then restart the gateway: it must refuse to start; `agent doctor` must fail (a) and (d). Restore 700. `chmod 666` the socket as the gateway user: doctor (c) must fail.
-6b. Impostor check: as the gateway user stop the gateway; as root (or any other user) bind a Unix socket at the same path and answer `ping` with anything, or leave a `gateway.json` you own. As your normal user `agent doctor --gateway-user agentgw` must FAIL checks (b), (c), (d) and (f), each naming the trust-anchor reason (wrong owner, discovery file owner or uid, or an `instance_id` that does not match). Remove the impostor and restart the real gateway.
+5. As your normal user: `export AGENT_HOME=<agent-home>` (the gateway's AGENT_HOME) and `export AGENT_GATEWAY_SOCKET=<socket_dir>/gateway.sock`, then `agent doctor --gateway-user agentgw` (use your gateway user's name). Why `AGENT_HOME`: doctor reads `<AGENT_HOME>/config.json` (`agentHome()` in `src/gateway/config.js` uses `AGENT_HOME` when set and non-blank, else `~/.agent`). Only when that read is DENIED does it learn the layout from `ping`, and the gateway's reported `layout.home` must equal this home. If the file is merely MISSING (the usual state of `~/.agent` for the runner), check (a) fails and (b), (c), (d), (f) are skipped. `config.json` is then unreadable to you, so doctor learns the layout from the gateway's `ping`, but it checks who the gateway is against the name YOU typed, never against the environment. Without `--gateway-user` the trust checks are refused. All eight checks must pass: (a) config and owners/modes, (b) real `ping`, (c) socket owner/group/mode, (d) boundary probes all denied, (e) kernel-permissions only, (f) no TCP listener, (g) price table, (h) locked-set checksum (record it). On macOS, (f) cannot see another user's process: run `sudo agent doctor --gateway-user <name> --only f` once. `--only` always prints `PARTIAL: N of M checks run`, never "all checks passed", and exits non-zero if any selected check fails; `agent run` still needs the FULL doctor.
+Run doctor as your normal user: never under `sudo` and never as the gateway user (it refuses root and the gateway uid; the exceptions are the documented macOS `sudo agent doctor --only f` above and the deliberate negative check in step 7).
+6. Negative checks (keep `AGENT_HOME` and `AGENT_GATEWAY_SOCKET` exported, run doctor as the normal user):
+   - `sudo chmod 755 <agent-home>` then restart the gateway: it refuses to start ("AGENT_HOME mode is 755, it must be 700"). With the gateway down doctor cannot learn the layout from `ping`, so (a), (b), (c), (d), (e) and (f) all FAIL. A six-failure output is expected, not only (a) and (d). Restore 700 and restart the gateway.
+   - `chmod 666` the socket as the gateway user: doctor (c) must fail with "socket mode is 666, it must be 660". Restore 660 (or restart the gateway).
+6b. Impostor check (replay). **This procedure has not been run on a real VM yet.** `socket_dir` is 0750, so a normal user cannot bind there; only root or the gateway user can. A bare "answer ping with anything" fails (b) as "not a well-formed ping" and only (c) names the owner, so the impostor must replay a genuine ping reply to exercise all four trust-anchor reasons. `$SD` is your `socket_dir`.
+   1. As the normal user, while the real gateway runs, capture a genuine ping reply:
+      `node -e "const {createConnection}=require('net');const c=createConnection(process.env.AGENT_GATEWAY_SOCKET);c.on('connect',()=>c.write(JSON.stringify({id:1,method:'ping',params:{}})+'\n'));c.on('data',d=>{require('fs').writeFileSync('/tmp/real-ping.json',d);c.end()})"`
+   2. Stop the gateway (remove a stale socket file if left).
+   3. As root, bind the same path and replay it:
+      `sudo env AGENT_GATEWAY_SOCKET=$SD/gateway.sock node -e "const net=require('net'),fs=require('fs');const real=fs.readFileSync('/tmp/real-ping.json','utf8').trim();net.createServer(c=>c.on('data',d=>{let id=1;try{id=JSON.parse(String(d).split('\n')[0]).id}catch{};const r=JSON.parse(real);r.id=id;c.write(JSON.stringify(r)+'\n')})).listen(process.env.AGENT_GATEWAY_SOCKET)"`
+   4. As the normal user, `agent doctor --gateway-user <name>` must fail (b), (c), (d), (f), each with a "trust anchor failed" reason (socket owned by uid 0, or discovery file missing). Then remove `/tmp/real-ping.json`, remove the impostor socket, and restart the real gateway.
 7. Run `agent doctor` as the gateway user: (d) must FAIL with "run doctor as the runner user".
 8. Only then lock `src/gateway/` by hand (add it to `.github/locked-paths.txt` and CODEOWNERS). M1a is not trusted until this passes.
 
