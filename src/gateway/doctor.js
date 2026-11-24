@@ -65,7 +65,8 @@ export async function runDoctor({ home = agentHome(), probes, priceFile = DEFAUL
         described = !!cfg;
         if (!cfg) aFail = p.ok ? 'config.json is not readable here and the gateway did not describe its layout' : `config.json is not readable here and the gateway did not answer (${p.why})`;
       }
-    } else aFail = loaded.errors[0];
+    } else if (/\(ENOENT\)/.test(String(loaded.errors?.[0]))) aFail = `config.json is missing. If you are the runner, set AGENT_HOME to the gateway's AGENT_HOME. (${loaded.errors[0]})`;
+    else aFail = loaded.errors[0];
   }
   const aFix = loaded.denied ? 'run `agent doctor --gateway-user <name>` with AGENT_GATEWAY_SOCKET=<socket_dir>/gateway.sock as a location hint (docs/gateway.md), and start the gateway' : 'run `agent init` to create a config, or fix config.json by hand (see docs/gateway.md); unknown keys and versions are refused';
   const gw = cfg?.identities.gateway_uid;

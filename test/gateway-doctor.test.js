@@ -318,3 +318,13 @@ test('real probes: stat reports type, owner and mode; readPid tolerates junk', (
   assert.equal(p.readPid(f), null); assert.equal(p.readPid(f + 'nope'), null);
   assert.equal(existsSync(f), true);
 });
+
+test('config.json MISSING (not denied): check (a) tells the runner to set AGENT_HOME; the denied case still takes the ping path', async () => {
+  const s = setup();
+  const missing = await asRunner(s, healthy(s, { readConfig: (h) => ({ valid: false, errors: [`cannot read ${join(h, 'config.json')} as JSON (ENOENT)`], config: null }) }));
+  assert.equal(byId(missing, 'a').ok, false);
+  assert.match(byId(missing, 'a').why, /If you are the runner, set AGENT_HOME to the gateway's AGENT_HOME/);
+  assert.match(byId(missing, 'a').fix, /agent init/);
+  const denied = await asRunner(s, deniedProbes(s));
+  assert.equal(denied.ok, true, formatDoctor(denied)); assert.match(byId(denied, 'a').why, /unreadable here/);
+});
