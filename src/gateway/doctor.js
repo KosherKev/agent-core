@@ -113,6 +113,14 @@ export async function runDoctor({ home = agentHome(), probes, priceFile = DEFAUL
       else if (!isInt(dSt.gid)) why.push('the group of the discovery file (gateway.json) was not reported');
       else if (dSt.gid !== gid) why.push(`the discovery file (gateway.json) is in group gid ${dSt.gid}, not the configured runner group ${one(c.runner_group).slice(0, 40)} (gid ${gid})`);
     }
+    // No component from the filesystem root down to AGENT_HOME, socket_dir, the socket or the discovery file may be a symbolic link (lstat on each).
+    const seen = new Set();
+    for (const [what, p] of [['AGENT_HOME', home], ['socket_dir', c.socket_dir], ['the socket', c.socket_path], ['the discovery file (gateway.json)', dFile]]) {
+      let r = null; try { r = typeof probes.symlinkComponent === 'function' ? probes.symlinkComponent(p) : null; } catch { r = null; }
+      if (!r) why.push(`the path of ${what} cannot be checked for symbolic links (no probe answered; fail closed)`);
+      else if (r.ok !== true) why.push(`the path of ${what} cannot be checked for symbolic links (${known(r.code) ?? 'no reason given'} at ${one(r.at ?? 'unknown').slice(0, 80)})`);
+      else if (r.link && !seen.has(r.link)) { seen.add(r.link); why.push(`${one(r.link).slice(0, 80)} on the path of ${what} is a symbolic link${r.target ? ` (to ${one(r.target).slice(0, 60)})` : ''}`); }
+    }
     const v = probes.tryCreate(c.socket_dir);
     if (v !== 'denied') why.push(`socket_dir is writable by this identity (${v === 'allowed' ? 'ALLOWED' : `not proven denied: ${v}`}), so anyone here could plant a socket`);
     let d = null; try { d = probes.readDiscovery(dFile); } catch { d = null; }

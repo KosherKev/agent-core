@@ -4,7 +4,7 @@ import { createHash, randomBytes } from 'node:crypto';
 import { REPO_ROOT } from '../self-model.js';
 import { request } from './client.js';
 import { loadConfig } from './config.js';
-import { realStat } from './layout.js';
+import { realStat, findSymlinkComponent } from './layout.js';
 import { resolveGroup, resolveUser, processInfo } from './sys.js';
 import { readDiscovery } from './discovery.js';
 import { runToolAsync, ToolError } from './tools.js';
@@ -18,6 +18,8 @@ export function realProbes({ pingTimeoutMs = 5000 } = {}) {
     uid: () => (typeof process.getuid === 'function' ? process.getuid() : -1),
     readConfig: (home) => loadConfig(home),
     stat: realStat,
+    /** Walk a path component by component with lstat: { ok, link } (link is the first symlink that is not an allowed system one, or null). */
+    symlinkComponent: (path) => findSymlinkComponent(path),
     resolveGroup,
     resolveUser,
     /** The gateway's discovery file as a validated object, or null (missing, unreadable or malformed). */

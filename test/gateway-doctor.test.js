@@ -40,6 +40,7 @@ function healthy(s, o = {}) {
     uid: () => RUNNER,
     readConfig: (h) => ({ valid: true, errors: [], config: cfg, home: h }),
     stat: (p) => table[p] ?? { ok: false, code: 'ENOENT' },
+    symlinkComponent: () => ({ ok: true, link: null }),
     resolveGroup: (g) => g,
     resolveUser: (n) => (n === 'gwuser' ? GW : null),
     readDiscovery: () => disc,
@@ -414,4 +415,44 @@ test('round 4 item 5: the discovery file group must equal the configured runner 
   const noGroup = await asRunner(s, deniedProbes(s, { resolveGroup: () => null, ping: async () => ({ ok: true, result: { version: 'm1a.1', uptime_ms: 1234, pid: PID, instance_id: IID, layout: { ...s.layout, runner_group: 'ghost', runner_gid: undefined } } }) }));
   assert.equal(byId(noGroup, 'b').ok, false); assert.match(byId(noGroup, 'b').why, /runner group is not configured or does not resolve/);
   noUndefined(bad); noUndefined(noGroup);
+});
+
+// ---- round 4 item 6a: symbolic links on the trust path ----
+import { findSymlinkComponent, SYSTEM_SYMLINKS } from '../src/gateway/layout.js';
+import { symlinkSync, mkdtempSync as mkd, realpathSync } from 'node:fs';
+
+test('round 4 item 6a: a symlinked ancestor of AGENT_HOME, socket_dir, the socket or the discovery file fails the trust anchor and names the component', async () => {
+  const s = setup();
+  const dFile = join(s.cfg.socket_dir, 'gateway.json');
+  const cases = [['AGENT_HOME', s.t.home], ['socket_dir', s.cfg.socket_dir], ['the socket', s.cfg.socket_path], ['the discovery file', dFile]];
+  for (const [what, path] of cases) {
+    const probes = deniedProbes(s, { symlinkComponent: (p) => (p === path ? { ok: true, link: '/srv/link', target: '/elsewhere' } : { ok: true, link: null }) });
+    const r = await asRunner(s, probes);
+    for (const id of ['b', 'c', 'd', 'f']) { assert.equal(byId(r, id).ok, false, `${what} ${id}`); assert.match(byId(r, id).why, /\/srv\/link on the path of/, `${what} ${id}`); }
+    assert.match(byId(r, 'b').why, /symbolic link \(to \/elsewhere\)/);
+  }
+  // not inspectable, or no probe at all: fail closed
+  const unknown = await asRunner(s, deniedProbes(s, { symlinkComponent: () => ({ ok: false, code: 'EACCES', at: '/x' }) }));
+  assert.match(byId(unknown, 'b').why, /cannot be checked for symbolic links \(EACCES at \/x\)/);
+  const { symlinkComponent: _drop, ...noProbe } = deniedProbes(s);
+  assert.match(byId(await asRunner(s, noProbe), 'b').why, /cannot be checked for symbolic links/);
+});
+
+test('round 4 item 6a: findSymlinkComponent walks every component with lstat; only the listed macOS root links are allowed', () => {
+  const dir = mkd(join(tmpdir(), 'gw-sym-')); const real = realpathSync(dir);
+  mkdirSync(join(real, 'a', 'b'), { recursive: true });
+  symlinkSync(join(real, 'a'), join(real, 'link'));
+  assert.deepEqual(findSymlinkComponent(join(real, 'a', 'b')), { ok: true, link: null });
+  const r = findSymlinkComponent(join(real, 'link', 'b'));
+  assert.equal(r.ok, true); assert.equal(r.link, join(real, 'link')); assert.equal(r.target, join(real, 'a'));
+  assert.equal(findSymlinkComponent(join(real, 'nope', 'x')).ok, false);
+  assert.equal(findSymlinkComponent('relative/path').ok, false);
+  // injected lstat: /var -> private/var is allowed only on darwin, only when root owns it and the target is exact
+  const mk = (uid) => (p) => ({ isSymbolicLink: () => p === '/var', uid });
+  const rl = () => 'private/var';
+  assert.deepEqual(findSymlinkComponent('/var/run/x', { lstat: mk(0), readlink: rl, platform: 'darwin' }), { ok: true, link: null });
+  assert.equal(findSymlinkComponent('/var/run/x', { lstat: mk(0), readlink: rl, platform: 'linux' }).link, '/var');
+  assert.equal(findSymlinkComponent('/var/run/x', { lstat: mk(501), readlink: rl, platform: 'darwin' }).link, '/var');
+  assert.equal(findSymlinkComponent('/var/run/x', { lstat: mk(0), readlink: () => '/tmp/evil', platform: 'darwin' }).link, '/var');
+  assert.deepEqual(Object.keys(SYSTEM_SYMLINKS), ['darwin']); assert.deepEqual(Object.keys(SYSTEM_SYMLINKS.darwin), ['/var', '/tmp', '/etc']);
 });

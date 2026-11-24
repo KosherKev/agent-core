@@ -1,4 +1,5 @@
-import { lstatSync, mkdirSync, chownSync, chmodSync } from 'node:fs';
+import { lstatSync, readlinkSync, mkdirSync, chownSync, chmodSync } from 'node:fs';
+import { resolve, sep } from 'node:path';
 import { resolveGroup } from './sys.js';
 
 /** The ownership and modes that make the Unix socket the only way in. The kernel enforces them, not this code. */
@@ -11,6 +12,37 @@ export function realStat(path) {
     const s = lstatSync(path);
     return { ok: true, mode: s.mode & 0o7777, uid: s.uid, gid: s.gid, type: s.isSymbolicLink() ? 'link' : s.isDirectory() ? 'dir' : s.isSocket() ? 'socket' : s.isFile() ? 'file' : 'other' };
   } catch (e) { return { ok: false, code: e?.code ?? 'ERR' }; }
+}
+
+/**
+ * The platform's well-known root-level system symlinks that are allowed on a trust path. ONLY these, ONLY at the top of the filesystem,
+ * ONLY when the link is owned by root and points exactly at the listed target. macOS keeps /var, /tmp and /etc under /private; /var is
+ * needed (the default socket_dir is /var/run/agent-gateway and temp dirs live under /var/folders). Linux has none: any symlink fails.
+ * Stricter alternative considered and rejected: requiring the configured path to equal its realpath would refuse every /var/... path on
+ * macOS, including the documented setup, so the explicit list is the strictest option that still works.
+ */
+export const SYSTEM_SYMLINKS = Object.freeze({ darwin: Object.freeze({ '/var': 'private/var', '/tmp': 'private/tmp', '/etc': 'private/etc' }) });
+
+/**
+ * Walk every component of an absolute path from the filesystem root with lstat (never following) and report the first symbolic link
+ * that is not an allowed system symlink. Returns { ok:true, link:null } when the whole path is plain, { ok:true, link, target } for the
+ * first offending component, or { ok:false, code, at } when a component cannot be inspected (callers fail closed).
+ */
+export function findSymlinkComponent(path, { lstat = lstatSync, readlink = readlinkSync, platform = process.platform } = {}) {
+  if (typeof path !== 'string' || !path.startsWith(sep)) return { ok: false, code: 'NOT_ABSOLUTE', at: String(path).slice(0, 100) };
+  const parts = resolve(path).split(sep).filter(Boolean);
+  let cur = '';
+  for (const part of parts) {
+    cur += sep + part;
+    let st;
+    try { st = lstat(cur); } catch (e) { return { ok: false, code: e?.code ?? 'ERR', at: cur }; }
+    if (!st.isSymbolicLink()) continue;
+    let target = null; try { target = readlink(cur); } catch { target = null; }
+    const allowed = SYSTEM_SYMLINKS[platform]?.[cur];
+    if (allowed !== undefined && st.uid === 0 && target === allowed) continue;
+    return { ok: true, link: cur, target };
+  }
+  return { ok: true, link: null };
 }
 
 const f = (v) => (v === undefined || v === null ? 'not reported' : v);
