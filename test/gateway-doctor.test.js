@@ -13,7 +13,7 @@ import { parsePriceTable } from '../src/grant/index.js';
 import { tempHome, makeApi } from './gateway-helpers.js';
 import { REPO_ROOT } from '../src/self-model.js';
 
-const GW = 1001; const RUNNER = 2002; const GID = 3003; const PID = 4321;
+const GW = 1001; const RUNNER = 2002; const GID = 3003; const PID = 4321; const IID = 'ab12'.repeat(8);
 const CMD = '/usr/bin/node /opt/agent-core/bin/agent gateway';
 
 /** A fake-uid config on disk (the doctor reads it for real); every system probe is faked. */
@@ -33,13 +33,18 @@ function healthy(s, o = {}) {
     [join(t.home, 'config.json')]: { ok: true, type: 'file', mode: 0o600, uid: GW, gid: 5 },
     [cfg.socket_dir]: { ok: true, type: 'dir', mode: 0o750, uid: GW, gid: GID },
     [cfg.socket_path]: { ok: true, type: 'socket', mode: 0o660, uid: GW, gid: GID },
+    [join(cfg.socket_dir, 'gateway.json')]: { ok: true, type: 'file', mode: 0o640, uid: GW, gid: GID },
   };
+  const disc = { socket_path: cfg.socket_path, instance_id: IID, gateway_uid: GW, gateway_gid: GID, pid: PID };
   return {
     uid: () => RUNNER,
     readConfig: (h) => ({ valid: true, errors: [], config: cfg, home: h }),
     stat: (p) => table[p] ?? { ok: false, code: 'ENOENT' },
     resolveGroup: (g) => g,
-    ping: async () => ({ id: 1, ok: true, result: { version: 'm1a.1', uptime_ms: 1234, pid: PID, access: 'kernel-permissions-only (no peer-uid probe configured)', layout } }),
+    resolveUser: (n) => (n === 'gwuser' ? GW : null),
+    readDiscovery: () => disc,
+    disc,
+    ping: async () => ({ id: 1, ok: true, result: { version: 'm1a.1', uptime_ms: 1234, pid: PID, instance_id: IID, access: 'kernel-permissions-only (no peer-uid probe configured)', layout } }),
     tryRead: () => 'denied', tryList: () => 'denied', tryCreate: () => 'denied',
     readPid: () => PID,
     processInfo: (pid) => ({ pid, uid: GW, cmdline: CMD }),
@@ -152,19 +157,92 @@ test('--only limits what is reported (and what decides the result)', async () =>
   assert.equal((await run(s, healthy(s, { tcpListeners: async () => ['x'] }), { only: ['f'] })).ok, false);
 });
 
-test('config.json unreadable by the runner (denied): the layout comes from the gateway ping and the doctor still proves the boundary', async () => {
+const deniedProbes = (s, o = {}) => healthy(s, { readConfig: () => ({ valid: false, errors: ['denied'], config: null, denied: true }), tryRead: () => 'denied', ...o });
+const asRunner = (s, probes, extra = {}) => run(s, probes, { socketPath: s.cfg.socket_path, gatewayUser: 'gwuser', ...extra });
+
+test('config.json unreadable by the runner (denied): with --gateway-user the layout comes from the ping and the boundary is proven', async () => {
   const s = setup();
-  const denied = (o = {}) => healthy(s, { readConfig: () => ({ valid: false, errors: ['denied'], config: null, denied: true }), tryRead: () => 'denied', ...o });
-  const ok = await run(s, denied(), { socketPath: s.cfg.socket_path });
+  const ok = await asRunner(s, deniedProbes(s));
   assert.equal(ok.ok, true, formatDoctor(ok)); assert.match(byId(ok, 'a').why, /unreadable here/);
-  const noSock = await run(s, denied());
-  assert.equal(byId(noSock, 'a').ok, false); assert.match(byId(noSock, 'a').fix, /AGENT_GATEWAY_SOCKET/);
-  const refused = await run(s, denied({ ping: async () => { throw new Error('closed'); } }), { socketPath: s.cfg.socket_path });
+  const noSock = await run(s, deniedProbes(s), { gatewayUser: 'gwuser' });
+  assert.equal(byId(noSock, 'a').ok, false); assert.match(byId(noSock, 'a').why, /AGENT_GATEWAY_SOCKET/);
+  const refused = await asRunner(s, deniedProbes(s, { ping: async () => { throw new Error('closed'); } }));
   assert.equal(byId(refused, 'a').ok, false); assert.equal(byId(refused, 'b').ok, false);
-  const wrongHome = await run(s, denied({ ping: async () => ({ ok: true, result: { version: 'x', uptime_ms: 1, pid: PID, layout: { ...s.layout, home: '/elsewhere' } } }) }), { socketPath: s.cfg.socket_path });
+  const wrongHome = await asRunner(s, deniedProbes(s, { ping: async () => ({ ok: true, result: { version: 'x', uptime_ms: 1, pid: PID, instance_id: IID, layout: { ...s.layout, home: '/elsewhere' } } }) }));
   assert.equal(byId(wrongHome, 'a').ok, false);
-  const noLayout = await run(s, denied({ ping: async () => ({ ok: true, result: { version: 'x', uptime_ms: 1, pid: PID } }) }), { socketPath: s.cfg.socket_path });
+  const noLayout = await asRunner(s, deniedProbes(s, { ping: async () => ({ ok: true, result: { version: 'x', uptime_ms: 1, pid: PID } }) }));
   assert.equal(byId(noLayout, 'a').ok, false);
+});
+
+test('trust anchor: without --gateway-user the trust checks are refused with a clear message, and the environment hint alone never passes', async () => {
+  const s = setup();
+  const r = await run(s, deniedProbes(s), { socketPath: s.cfg.socket_path }); // AGENT_GATEWAY_SOCKET set, no --gateway-user
+  assert.equal(r.ok, false);
+  assert.equal(byId(r, 'a').ok, false); assert.match(byId(r, 'a').why, /--gateway-user/);
+  for (const id of ['b', 'c', 'd', 'f']) assert.equal(byId(r, id).ok, false, id);
+  const unknown = await asRunner(s, deniedProbes(s), { gatewayUser: 'nobody-here' });
+  assert.equal(byId(unknown, 'a').ok, false); assert.match(byId(unknown, 'a').why, /does not resolve/);
+});
+
+// Each entry breaks exactly one trust condition. b, c, d and f must all fail and name it; a passes, g and h are not trust checks.
+const trustBreaks = [
+  ['socket owned by someone else', (s) => withTable(s, { [s.cfg.socket_path]: { uid: RUNNER } }), /the socket is owned by uid 2002/],
+  ['socket_dir owned by someone else', (s) => withTable(s, { [s.cfg.socket_dir]: { uid: RUNNER } }), /socket_dir is owned by uid 2002/],
+  ['discovery file owned by someone else', (s) => withTable(s, { [join(s.cfg.socket_dir, 'gateway.json')]: { uid: RUNNER } }), /discovery file \(gateway.json\) is owned by uid 2002/],
+  ['discovery file missing', (s) => healthy(s, { readDiscovery: () => null }), /discovery file is missing/],
+  ['discovery names another uid', (s) => healthy(s, { readDiscovery: () => ({ ...healthy(s).disc, gateway_uid: RUNNER }) }), /discovery file names uid 2002/],
+  ['discovery names another socket', (s) => healthy(s, { readDiscovery: () => ({ ...healthy(s).disc, socket_path: '/elsewhere/gateway.sock' }) }), /different socket path/],
+  ['ping instance_id differs from discovery', (s) => healthy(s, { readDiscovery: () => ({ ...healthy(s).disc, instance_id: 'cd34'.repeat(8) }) }), /instance_id from ping does not match/],
+  ['ping has no instance_id', (s) => healthy(s, { ping: async () => ({ ok: true, result: { version: 'm1a.1', uptime_ms: 1, pid: PID, layout: s.layout } }) }), /instance_id from ping does not match/],
+  ['socket_dir writable by the doctor identity', (s) => healthy(s, { tryCreate: (p) => (p === s.cfg.socket_dir ? 'allowed' : 'denied') }), /socket_dir is writable by this identity/],
+  ['gateway describes another uid', (s) => healthy(s, { ping: async () => ({ ok: true, result: { version: 'm1a.1', uptime_ms: 1, pid: PID, instance_id: IID, layout: { ...s.layout, gateway_uid: RUNNER } } }) }), /describes its own uid as 2002/],
+  ['doctor runs as root', (s) => healthy(s, { uid: () => 0 }), /cannot prove the boundary/],
+];
+for (const [label, make, why] of trustBreaks) {
+  test(`trust anchor fails b, c, d and f when exactly this is broken: ${label}`, async () => {
+    const s = setup();
+    const probes = make(s);
+    const r = await asRunner(s, { ...probes, readConfig: () => ({ valid: false, errors: ['denied'], config: null, denied: true }) });
+    for (const id of ['b', 'c', 'd', 'f']) { assert.equal(byId(r, id).ok, false, `${id} must fail`); assert.match(byId(r, id).why, why, id); }
+    assert.equal(byId(r, 'e').ok, false);
+    assert.equal(r.ok, false);
+  });
+}
+
+test('trust anchor: an impostor socket reached through AGENT_GATEWAY_SOCKET (impostor-owned, its own instance_id, a forged discovery file it owns) is rejected', async () => {
+  const s = setup();
+  const impostor = withTable(s, { [s.cfg.socket_path]: { uid: RUNNER }, [join(s.cfg.socket_dir, 'gateway.json')]: { uid: RUNNER } });
+  const forged = { ...impostor, readConfig: () => ({ valid: false, errors: ['denied'], config: null, denied: true }), readDiscovery: () => ({ ...healthy(s).disc, gateway_uid: RUNNER }), ping: async () => ({ ok: true, result: { version: 'm1a.1', uptime_ms: 1, pid: PID, instance_id: IID, layout: { ...s.layout, gateway_uid: RUNNER } } }) };
+  const r = await asRunner(s, forged);
+  assert.equal(r.ok, false);
+  for (const id of ['b', 'c', 'd', 'f']) assert.equal(byId(r, id).ok, false, id);
+});
+
+test('trust anchor: the socket asked for must be the one the gateway describes', async () => {
+  const s = setup();
+  const r = await asRunner(s, deniedProbes(s), { socketPath: join(s.cfg.socket_dir, 'other.sock') });
+  for (const id of ['b', 'c', 'd', 'f']) assert.equal(byId(r, id).ok, false, id);
+  assert.match(byId(r, 'b').why, /socket path/);
+});
+
+test('a readable config.json (the gateway side) still runs but is flagged as proving nothing about the runner boundary', async () => {
+  const s = setup();
+  const r = await run(s, healthy(s));
+  assert.equal(r.ok, true);
+  assert.match(formatDoctor(r), /NOTE: .*proves nothing about the runner boundary/);
+  assert.match(formatDoctor(r), /all checks passed/);
+});
+
+test('--only: a partial run prints PARTIAL with the counts, never the all-passed line, and is not ok when a selected check fails', async () => {
+  const s = setup();
+  const r = await run(s, healthy(s), { only: ['a', 'b'] });
+  assert.deepEqual(r.partial, { run: 2, of: 8 }); assert.equal(r.ok, true);
+  const text = formatDoctor(r);
+  assert.match(text, /PARTIAL: 2 of 8 checks run/); assert.ok(!text.includes('all checks passed'));
+  const bad = await run(s, healthy(s, { ping: async () => { throw new Error('closed'); } }), { only: ['a', 'b'] });
+  assert.equal(bad.ok, false); assert.match(formatDoctor(bad), /PARTIAL: 2 of 8 checks run; 1 FAILED/);
+  const full = await run(s, healthy(s));
+  assert.equal(full.partial, null); assert.match(formatDoctor(full), /all checks passed/);
 });
 
 test('wellFormedPing and isGatewayCmdline', () => {

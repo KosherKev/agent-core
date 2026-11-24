@@ -1,4 +1,4 @@
-import { join } from 'node:path';
+import { join, dirname, resolve } from 'node:path';
 import { agentHome } from './config.js';
 import { loadGatewayPrices, checkPriceTable } from './prices.js';
 import { DEFAULT_PRICE_FILE } from '../grant/index.js';
@@ -7,6 +7,7 @@ import { isGatewayCmdline } from './sys.js';
 
 const pass = (id, name, why) => ({ id, name, ok: true, why, fix: null });
 const fail = (id, name, why, fix) => ({ id, name, ok: false, why, fix });
+const CHECK_NAMES = { b: 'gateway answers ping', c: 'socket owner, group and mode', d: 'boundary probes denied', f: 'no TCP listener' };
 const one = (s) => String(s).replace(/\s+/g, ' ').slice(0, 220);
 const isInt = (n) => Number.isSafeInteger(n) && n >= 0;
 const isStr = (s) => typeof s === 'string' && s.length > 0 && s.length < 1024;
@@ -27,10 +28,14 @@ function describedConfig(layout, home) {
  * All system access goes through `probes` so tests use fakes; a probe that throws or answers "unknown" is a failure (fail closed).
  * Run it as the RUNNER user: the boundary probes (d) are only meaningful as the identity that must be kept out.
  * When config.json itself is unreadable by this identity (which is what the boundary demands of the runner), the layout is taken
- * from the running gateway's own `ping` answer; that needs the socket path in `socketPath` (the AGENT_GATEWAY_SOCKET variable).
- * Returns { ok, checks }.
+ * from the running gateway's own `ping` answer, and NOTHING in this identity's environment is trusted for who the gateway is:
+ * `socketPath` (the AGENT_GATEWAY_SOCKET variable) is only a location hint. The trust anchor is `gatewayUser`, a name the human
+ * types on the command line (--gateway-user). The socket, its directory and the discovery file must be owned by that user's uid,
+ * the directory must not be writable by this identity, and the ping's instance_id must equal the discovery file's. Without it
+ * the trust checks are refused. A run with a readable config.json (the gateway user's own) proves nothing about the runner boundary.
+ * Returns { ok, checks, partial, notes }; `partial` is { run, of } when --only left checks out, else null.
  */
-export async function runDoctor({ home = agentHome(), probes, priceFile = DEFAULT_PRICE_FILE, socketPath, only } = {}) {
+export async function runDoctor({ home = agentHome(), probes, priceFile = DEFAULT_PRICE_FILE, socketPath, only, gatewayUser } = {}) {
   const checks = [];
   const safe = async (id, name, fn, fixOnError) => {
     try { checks.push(await fn()); } catch { checks.push(fail(id, name, 'check could not run (probe error)', fixOnError)); }
@@ -44,17 +49,25 @@ export async function runDoctor({ home = agentHome(), probes, priceFile = DEFAUL
   };
 
   let loaded; try { loaded = probes.readConfig(home); } catch { loaded = { valid: false, errors: ['config probe error'] }; }
-  let cfg = loaded.valid ? loaded.config : null; let described = false; let aFail = null;
+  let cfg = loaded.valid ? loaded.config : null; let described = false; let aFail = null; let anchorUid = null;
+  const notes = [];
+  if (cfg) notes.push('config.json is readable by this identity, so this run is the gateway side looking at itself: it proves nothing about the runner boundary. The proof is a human running `agent doctor --gateway-user <name>` as the runner (docs/gateway.md).');
   if (!cfg) {
-    if (loaded.denied && socketPath) {
-      const p = await ping(socketPath);
-      cfg = p.ok ? describedConfig(p.reply.layout, home) : null;
-      described = !!cfg;
-      if (!cfg) aFail = p.ok ? 'config.json is not readable here and the gateway did not describe its layout' : `config.json is not readable here and the gateway did not answer (${p.why})`;
-    } else if (loaded.denied) aFail = 'config.json is not readable by this user (expected for the runner) and AGENT_GATEWAY_SOCKET is not set';
-    else aFail = loaded.errors[0];
+    if (loaded.denied && !gatewayUser) aFail = 'config.json is not readable by this user (expected for the runner), so the trust checks are refused: say who the gateway is with --gateway-user <name>';
+    else if (loaded.denied && !socketPath) aFail = 'config.json is not readable by this user (expected for the runner) and AGENT_GATEWAY_SOCKET (the location hint) is not set';
+    else if (loaded.denied) {
+      try { anchorUid = probes.resolveUser(gatewayUser); } catch { anchorUid = null; }
+      if (!isInt(anchorUid)) aFail = `--gateway-user ${one(gatewayUser).slice(0, 40)} does not resolve to a user on this machine`;
+      else {
+        const p = await ping(socketPath);
+        cfg = p.ok ? describedConfig(p.reply.layout, home) : null;
+        if (cfg) cfg = { ...cfg, identities: { gateway_uid: anchorUid } }; // the human-supplied identity, never the one the socket claims
+        described = !!cfg;
+        if (!cfg) aFail = p.ok ? 'config.json is not readable here and the gateway did not describe its layout' : `config.json is not readable here and the gateway did not answer (${p.why})`;
+      }
+    } else aFail = loaded.errors[0];
   }
-  const aFix = loaded.denied ? 'export AGENT_GATEWAY_SOCKET=<socket_dir>/gateway.sock (the socket path from docs/gateway.md) and start the gateway' : 'run `agent init` to create a config, or fix config.json by hand (see docs/gateway.md); unknown keys and versions are refused';
+  const aFix = loaded.denied ? 'run `agent doctor --gateway-user <name>` with AGENT_GATEWAY_SOCKET=<socket_dir>/gateway.sock as a location hint (docs/gateway.md), and start the gateway' : 'run `agent init` to create a config, or fix config.json by hand (see docs/gateway.md); unknown keys and versions are refused';
   const gw = cfg?.identities.gateway_uid;
   let gid = null;
   if (cfg) { try { gid = probes.resolveGroup(cfg.runner_group); } catch { gid = null; } if (gid === null || gid === undefined) gid = cfg.runner_gid ?? null; }
@@ -72,8 +85,43 @@ export async function runDoctor({ home = agentHome(), probes, priceFile = DEFAUL
     return pass('a', 'config valid, owners and modes', described ? 'config.json is unreadable here (expected); the running gateway validated it, and AGENT_HOME and socket_dir are owned and moded as required' : 'config valid; AGENT_HOME 700, config.json not group/other writable, socket_dir 750, all owned correctly');
   }, 'check ownership and modes of AGENT_HOME, config.json and socket_dir by hand (ls -ld)');
 
+  // Trust anchor (only when config.json is unreadable): everything is checked against the human-supplied gateway user, never against the environment.
+  let trustMemo = null;
+  const trust = (c) => {
+    if (trustMemo) return trustMemo;
+    const why = [];
+    const hint = resolve(socketPath);
+    const owner = (st, what) => { if (!st.ok) why.push(`${what} cannot be inspected (${st.code})`); else if (st.uid !== anchorUid) why.push(`${what} is owned by uid ${st.uid}, not ${one(gatewayUser).slice(0, 40)} (uid ${anchorUid})`); };
+    const me = probes.uid();
+    if (me === 0 || me === anchorUid) why.push(`doctor runs as uid ${me}, which cannot prove the boundary`);
+    if (c.socket_path !== hint) why.push('the gateway describes a socket path that is not the one asked for');
+    if (c.socket_dir !== dirname(hint)) why.push('the described socket_dir is not the directory of the socket asked for');
+    owner(probes.stat(c.socket_dir), 'socket_dir'); owner(probes.stat(c.socket_path), 'the socket');
+    const dFile = join(c.socket_dir, 'gateway.json');
+    owner(probes.stat(dFile), 'the discovery file (gateway.json)');
+    const v = probes.tryCreate(c.socket_dir);
+    if (v !== 'denied') why.push(`socket_dir is writable by this identity (${v === 'allowed' ? 'ALLOWED' : `not proven denied: ${v}`}), so anyone here could plant a socket`);
+    let d = null; try { d = probes.readDiscovery(dFile); } catch { d = null; }
+    if (!d) why.push('the discovery file is missing, unreadable or malformed');
+    else {
+      if (d.gateway_uid !== anchorUid) why.push(`the discovery file names uid ${d.gateway_uid}, not the gateway uid ${anchorUid}`);
+      if (d.socket_path !== hint) why.push('the discovery file names a different socket path');
+      const pi = pinged?.ok ? pinged.reply.instance_id : null;
+      if (typeof pi !== 'string' || pi !== d.instance_id) why.push('the instance_id from ping does not match the discovery file (the answering process is not the one that wrote it)');
+    }
+    if (!pinged?.ok) why.push('the gateway did not answer a ping');
+    else if (pinged.reply.layout?.gateway_uid !== anchorUid) why.push(`the gateway describes its own uid as ${pinged.reply.layout?.gateway_uid}, not ${anchorUid}`);
+    trustMemo = why;
+    return why;
+  };
+  const trustFix = 'do not trust this socket: as the real gateway user find what created it (ls -l the socket_dir), stop any impostor, restart the gateway, then re-run agent doctor --gateway-user <name>';
   const needCfg = (id, name) => fail(id, name, 'skipped: config is not valid', 'fix check (a) first');
-  const withCfg = (id, name, fn, fixOnError) => (cfg ? safe(id, name, () => fn(cfg), fixOnError) : checks.push(needCfg(id, name)));
+  // b, c, d and f rest on the gateway being who it says it is; without a human-supplied anchor they cannot pass, so each is refused if the anchor does not hold.
+  const anchored = (id, fn) => async (c) => {
+    if (anchorUid !== null && !(id === 'b' && !pinged?.ok)) { const why = trust(c); if (why.length) return fail(id, CHECK_NAMES[id], one(`trust anchor failed: ${why.join('; ')}`), trustFix); }
+    return fn(c);
+  };
+  const withCfg = (id, name, fn, fixOnError) => (cfg ? safe(id, name, () => anchored(id, fn)(cfg), fixOnError) : checks.push(needCfg(id, name)));
 
   // (b) a real handshake, not just an open socket
   await withCfg('b', 'gateway answers ping', async (c) => {
@@ -151,11 +199,13 @@ export async function runDoctor({ home = agentHome(), probes, priceFile = DEFAUL
   }, 'make sure .github/locked-paths.txt exists in the repository');
 
   const shown = only ? checks.filter((c) => only.includes(c.id)) : checks;
-  return { ok: shown.length > 0 && shown.every((c) => c.ok), checks: shown };
+  return { ok: shown.length > 0 && shown.every((c) => c.ok), checks: shown, partial: shown.length < checks.length ? { run: shown.length, of: checks.length } : null, notes };
 }
 
-export function formatDoctor({ ok, checks }) {
+export function formatDoctor({ ok, checks, partial = null, notes = [] }) {
   const lines = checks.map((c) => `${c.ok ? 'PASS' : 'FAIL'} (${c.id}) ${c.name}: ${c.why}${c.ok ? '' : `\n       fix: ${c.fix}`}`);
-  lines.push('', ok ? 'doctor: all checks passed' : `doctor: ${checks.filter((c) => !c.ok).length} check(s) FAILED`);
+  for (const n of notes) lines.push('', `NOTE: ${n}`);
+  const failedN = checks.filter((c) => !c.ok).length;
+  lines.push('', partial ? `doctor: PARTIAL: ${partial.run} of ${partial.of} checks run${failedN ? `; ${failedN} FAILED` : '; the ones run passed, which is NOT a full pass'}` : ok ? 'doctor: all checks passed' : `doctor: ${failedN} check(s) FAILED`);
   return lines.join('\n');
 }
