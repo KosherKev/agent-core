@@ -10,6 +10,7 @@ import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
+let ridN = 0; const rid = () => `req-${++ridN}`;
 // Unix socket paths are short-limited; use a short temp dir.
 const shortHome = (opts) => {
   const t = tempHome(opts);
@@ -113,7 +114,7 @@ test('end to end over the socket: openRun, modelCall to the mock, endRun; the ru
     const sock = config.socket_path;
     const g = makeGrant();
     assert.equal((await request(sock, 'openRun', { run_id: 'w1', grant: g })).ok, true);
-    const r = await request(sock, 'modelCall', { run_id: 'w1', provider: 'mockprov', model: FREE_MODEL, messages: [{ role: 'user', content: 'hi' }] });
+    const r = await request(sock, 'modelCall', { request_id: rid(), run_id: 'w1', provider: 'mockprov', model: FREE_MODEL, messages: [{ role: 'user', content: 'hi' }] });
     assert.equal(r.result.message.content, 'over the wire');
     assert.ok(r.budget.remaining_micro > 0);
     assert.ok(!JSON.stringify(r).includes('FAKEKEY'));

@@ -21,33 +21,48 @@ export const unknownPeerUid = () => null;
  * it only ever calls listen(path). For each connection the peer uid is resolved and checked against the allowlist BEFORE any
  * data listener is attached or any byte is read, so an unlisted peer's bytes are never parsed.
  */
-export function createGatewayServer({ api, config, getPeerUid = unknownPeerUid, log = () => {}, idleMs = 30_000 }) {
+export function createGatewayServer({ api, config, getPeerUid = unknownPeerUid, log = () => {}, idleMs = config.idle_timeout_ms ?? 30_000, maxRequestBytes = config.max_request_bytes ?? MAX_LINE }) {
+  const byteLen = (s) => Buffer.byteLength(s, 'utf8');
   const server = net.createServer({ allowHalfOpen: false, pauseOnConnect: true }, (socket) => {
     (async () => {
       let uid;
       try { uid = await getPeerUid(socket); } catch { uid = null; }
       if (!peerAllowed(config.allowed_peer_uids, uid)) { log('connection refused: peer not allowlisted'); socket.destroy(); return; }
-      socket.setTimeout(idleMs, () => socket.destroy());
-      let buf = ''; let chain = Promise.resolve();
+      let buf = ''; let inFlight = false;
+      // The idle timeout counts only quiet time between requests. While a request is being served no timer runs, so a slow provider call is never cut off.
+      const arm = () => { if (!socket.destroyed) socket.setTimeout(idleMs); };
+      socket.on('timeout', () => { if (!inFlight) socket.destroy(); });
+      arm();
       socket.setEncoding('utf8');
       socket.on('error', () => socket.destroy());
+      const send = (res) => { if (!socket.destroyed) socket.write(JSON.stringify(res) + '\n'); };
+      const serve = (line) => {
+        inFlight = true; socket.setTimeout(0);
+        (async () => {
+          let req;
+          try { req = JSON.parse(line); } catch { req = null; }
+          send(req === null ? { id: null, ok: false, error: { code: 'invalid_request', message: 'request is not valid JSON' } } : await api.handle(req));
+        })().catch(() => socket.destroy()).finally(() => { inFlight = false; arm(); });
+      };
       socket.on('data', (chunk) => {
         buf += chunk;
-        if (buf.length > MAX_LINE) { socket.destroy(); return; }
         let nl;
         while ((nl = buf.indexOf('\n')) >= 0) {
           const line = buf.slice(0, nl); buf = buf.slice(nl + 1);
-          chain = chain.then(async () => {
-            let req;
-            try { req = JSON.parse(line); } catch { req = null; }
-            const res = req === null ? { id: null, ok: false, error: { code: 'invalid_request', message: 'request is not valid JSON' } } : await api.handle(req);
-            if (!socket.destroyed) socket.write(JSON.stringify(res) + '\n');
-          });
+          if (byteLen(line) > maxRequestBytes) { socket.destroy(); return; }
+          if (inFlight) {
+            let id = null; try { const q = JSON.parse(line); id = q?.id ?? null; } catch { /* no id */ }
+            send({ id, ok: false, error: { code: 'busy', message: 'a request is already in flight on this connection; wait for its response' } });
+            continue;
+          }
+          serve(line);
         }
+        if (byteLen(buf) > maxRequestBytes) socket.destroy();
       });
       socket.resume();
     })().catch(() => socket.destroy());
   });
+  if (config.max_connections) server.maxConnections = config.max_connections;
 
   return Object.freeze({
     server,

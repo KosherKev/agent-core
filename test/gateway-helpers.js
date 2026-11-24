@@ -33,7 +33,7 @@ export function makeApi({ home, config, priceTable, fetchFn, now, logs = [] } = 
   const table = priceTable ?? loadPriceTable().table;
   const store = createFileLedgerStore(config.ledger_dir, now ? { now } : {});
   const runs = createRunStore(config.runs_dir, now ? { now } : {});
-  const api = createGatewayApi({ config, store, runs, credentials, priceTable: table, fetchFn, now, log: (l) => logs.push(l), makeSink: (id) => createSpendSink(join(config.runs_dir, `${id}.spend.jsonl`), redact) });
+  const api = createGatewayApi({ config, store, runs, credentials, priceTable: table, transport: fetchFn, now, log: (l) => logs.push(l), makeSink: (id) => createSpendSink(join(config.runs_dir, `${id}.spend.jsonl`), redact) });
   return { api, store, runs, credentials, logs };
 }
 

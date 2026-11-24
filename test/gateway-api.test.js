@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import { tempHome, makeApi, startMock, chatOk, allFiles, makeGrant, FAKE_KEY, PAID_TABLE, FREE_MODEL } from './gateway-helpers.js';
 import { METHODS } from '../src/gateway/api.js';
 
+let ridN = 0; const rid = () => `req-${++ridN}`;
 const msgs = [{ role: 'user', content: 'hello' }];
 const call = (api, method, params) => api.handle({ id: 1, method, params });
 
@@ -21,7 +22,7 @@ test('modelCall for a free model works against the existing mock server and retu
   const s = await setup();
   try {
     assert.equal((await open(s.api)).ok, true);
-    const r = await call(s.api, 'modelCall', { run_id: 'run-1', provider: 'mockprov', model: FREE_MODEL, messages: msgs, max_tokens: 50 });
+    const r = await call(s.api, 'modelCall', { request_id: rid(), run_id: 'run-1', provider: 'mockprov', model: FREE_MODEL, messages: msgs, max_tokens: 50 });
     assert.equal(r.ok, true, JSON.stringify(r));
     assert.equal(r.result.message.content, 'hi');
     assert.equal(r.result.cost_micro, 0);
@@ -40,8 +41,8 @@ test('no key appears in any response, log, journal, record or spend file even wh
   try {
     const responses = [];
     responses.push(await open(s.api));
-    responses.push(await call(s.api, 'modelCall', { run_id: 'run-1', provider: 'mockprov', model: FREE_MODEL, messages: msgs }));
-    responses.push(await call(s.api, 'modelCall', { run_id: 'run-1', provider: 'nope', model: FREE_MODEL, messages: msgs }));
+    responses.push(await call(s.api, 'modelCall', { request_id: rid(), run_id: 'run-1', provider: 'mockprov', model: FREE_MODEL, messages: msgs }));
+    responses.push(await call(s.api, 'modelCall', { request_id: rid(), run_id: 'run-1', provider: 'nope', model: FREE_MODEL, messages: msgs }));
     responses.push(await call(s.api, 'journalRead', { run_id: 'run-1' }));
     responses.push(await call(s.api, 'endRun', { run_id: 'run-1', outcome: 'ok' }));
     const text = JSON.stringify(responses) + s.logs.join('\n');
@@ -61,7 +62,7 @@ test('the credential store is read from its own file and a missing credential re
     writeFileSync(join(t.home, 'credentials.json'), JSON.stringify({ providers: { other: FAKE_KEY } }), { mode: 0o600 });
     const { api } = makeApi(t);
     await open(api);
-    const r = await call(api, 'modelCall', { run_id: 'run-1', provider: 'mockprov', model: FREE_MODEL, messages: msgs });
+    const r = await call(api, 'modelCall', { request_id: rid(), run_id: 'run-1', provider: 'mockprov', model: FREE_MODEL, messages: msgs });
     assert.equal(r.ok, false); assert.equal(r.error.code, 'credential');
     assert.equal(mock.requests.length, 0);
   } finally { await mock.close(); }
@@ -87,7 +88,7 @@ test('settle uses the higher of reported and computed cost', async () => {
   const highReport = await setup({ priceTable: PAID_TABLE, handler: () => chatOk('x', { prompt_tokens: 100, completion_tokens: 5, cost: '0.0005' }) });
   const noReport = await setup({ priceTable: PAID_TABLE, handler: () => chatOk('x', { prompt_tokens: 100, completion_tokens: 5 }) });
   try {
-    const run = async (s) => { await open(s.api); return call(s.api, 'modelCall', { run_id: 'run-1', provider: 'mockprov', model: 'paid/model', messages: msgs, max_tokens: 200 }); };
+    const run = async (s) => { await open(s.api); return call(s.api, 'modelCall', { request_id: rid(), run_id: 'run-1', provider: 'mockprov', model: 'paid/model', messages: msgs, max_tokens: 200 }); };
     const a = await run(lowReport); const b = await run(highReport); const c = await run(noReport);
     assert.equal(a.result.cost_micro, 105, 'computed beats a lower report');
     assert.equal(b.result.cost_micro, 500, 'reported beats a lower computed');
@@ -102,7 +103,7 @@ test('the tracked (empty) price table refuses every paid model before any networ
   try {
     await open(s.api);
     for (const model of ['paid/model', 'vendor/m', 'x:freeish']) {
-      const r = await call(s.api, 'modelCall', { run_id: 'run-1', provider: 'mockprov', model, messages: msgs });
+      const r = await call(s.api, 'modelCall', { request_id: rid(), run_id: 'run-1', provider: 'mockprov', model, messages: msgs });
       assert.equal(r.ok, false, model); assert.equal(r.error.code, 'price', model);
       assert.ok(r.budget, 'budget still returned on a refusal');
     }
@@ -118,7 +119,7 @@ test('prices are keyed by provider AND model: a bare model key or another provid
   const s = await setup({ priceTable: table });
   try {
     await open(s.api);
-    const r = await call(s.api, 'modelCall', { run_id: 'run-1', provider: 'mockprov', model: 'paid/model', messages: msgs });
+    const r = await call(s.api, 'modelCall', { request_id: rid(), run_id: 'run-1', provider: 'mockprov', model: 'paid/model', messages: msgs });
     assert.equal(r.error.code, 'price');
     assert.equal(s.mock.requests.length, 0);
   } finally { await s.close(); }
@@ -147,14 +148,14 @@ test('provider rejection releases the reservation; a network failure settles at 
   const s = await setup({ priceTable: PAID_TABLE, handler: () => ({ status: 500, body: { error: { message: 'boom' } } }) });
   try {
     await open(s.api);
-    const r = await call(s.api, 'modelCall', { run_id: 'run-1', provider: 'mockprov', model: 'paid/model', messages: msgs, max_tokens: 100 });
+    const r = await call(s.api, 'modelCall', { request_id: rid(), run_id: 'run-1', provider: 'mockprov', model: 'paid/model', messages: msgs, max_tokens: 100 });
     assert.equal(r.error.code, 'provider_rejected');
     assert.equal(r.budget.settled_micro, 0); assert.equal(r.budget.reserved_micro, 0);
   } finally { await s.close(); }
   const down = tempHome({ baseUrl: 'http://127.0.0.1:1/v1' });
   const d = makeApi({ ...down, priceTable: PAID_TABLE });
   await open(d.api);
-  const r2 = await call(d.api, 'modelCall', { run_id: 'run-1', provider: 'mockprov', model: 'paid/model', messages: msgs, max_tokens: 100 });
+  const r2 = await call(d.api, 'modelCall', { request_id: rid(), run_id: 'run-1', provider: 'mockprov', model: 'paid/model', messages: msgs, max_tokens: 100 });
   assert.equal(r2.error.code, 'provider_error');
   assert.ok(r2.budget.settled_micro > 0, 'worst case settled');
 });
@@ -163,7 +164,7 @@ test('the budget is enforced: a call whose worst case does not fit is refused', 
   const s = await setup({ priceTable: PAID_TABLE });
   try {
     await call(s.api, 'openRun', { run_id: 'run-1', grant: makeGrant({ budget: { max_usd: 0.000001, max_tool_calls: 5 } }) });
-    const r = await call(s.api, 'modelCall', { run_id: 'run-1', provider: 'mockprov', model: 'paid/model', messages: [{ role: 'user', content: 'a long enough message to exceed one micro-usd budget' }] });
+    const r = await call(s.api, 'modelCall', { request_id: rid(), run_id: 'run-1', provider: 'mockprov', model: 'paid/model', messages: [{ role: 'user', content: 'a long enough message to exceed one micro-usd budget' }] });
     assert.equal(r.ok, false); assert.equal(r.error.code, 'budget');
     assert.equal(s.mock.requests.length, 0);
   } finally { await s.close(); }
@@ -175,7 +176,7 @@ test('run record carries start, end, duration, model, provider, outcome and capa
   try {
     await call(s.api, 'openRun', { run_id: 'run-9', grant: makeGrant({ expires_at: '2031-01-01T00:00:00Z' }) });
     t += 1500;
-    await call(s.api, 'modelCall', { run_id: 'run-9', provider: 'mockprov', model: FREE_MODEL, messages: msgs });
+    await call(s.api, 'modelCall', { request_id: rid(), run_id: 'run-9', provider: 'mockprov', model: FREE_MODEL, messages: msgs });
     assert.equal((await call(s.api, 'journalAppend', { run_id: 'run-9', capability_added: { name: 'git-push', version: '1.0.0' } })).ok, true);
     assert.equal((await call(s.api, 'journalAppend', { run_id: 'run-9', capability_added: { name: 'web-fetch' } })).ok, true);
     t += 500;
@@ -188,7 +189,7 @@ test('run record carries start, end, duration, model, provider, outcome and capa
     assert.deepEqual(rec.capability_added.map((c) => c.name), ['git-push', 'web-fetch']);
     assert.equal((await call(s.api, 'journalRead', { run_id: 'run-9' })).result.record.outcome, 'ok');
     // closed run takes no more calls
-    assert.equal((await call(s.api, 'modelCall', { run_id: 'run-9', provider: 'mockprov', model: FREE_MODEL, messages: msgs })).error.code, 'run_not_open');
+    assert.equal((await call(s.api, 'modelCall', { request_id: rid(), run_id: 'run-9', provider: 'mockprov', model: FREE_MODEL, messages: msgs })).error.code, 'run_not_open');
   } finally { await s.close(); }
 });
 
@@ -217,7 +218,7 @@ test('pushBranch and requestMerge return a structured not-implemented refusal', 
       assert.deepEqual(r.error, { code: 'not_implemented', message: 'not implemented in M1a' });
       assert.equal(r.ok, false);
     }
-    assert.equal(METHODS.length, 10);
+    assert.equal(METHODS.length, 11);
   } finally { await s.close(); }
 });
 
@@ -240,7 +241,7 @@ test('the spend sidecar and ledger record the calls; spend files hold no key', a
   const s = await setup();
   try {
     await open(s.api);
-    await call(s.api, 'modelCall', { run_id: 'run-1', provider: 'mockprov', model: FREE_MODEL, messages: msgs });
+    await call(s.api, 'modelCall', { request_id: rid(), run_id: 'run-1', provider: 'mockprov', model: FREE_MODEL, messages: msgs });
     const spend = readdirSync(s.t.config.runs_dir).filter((n) => n.endsWith('.spend.jsonl'));
     assert.equal(spend.length, 1);
     assert.match(readFileSync(join(s.t.config.runs_dir, spend[0]), 'utf8'), /"event":"settle"/);

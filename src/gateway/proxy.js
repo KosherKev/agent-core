@@ -11,7 +11,7 @@ export class ProxyError extends Error {
  * Authorization header of this one request; it is never returned, logged or put in an error.
  * Returns { json, status, networkError }: json is the parsed body (or null), status the HTTP status (0 on a network error).
  */
-export async function callProvider({ config, credentials, provider, model, messages, maxTokens, fetchFn = globalThis.fetch, timeoutMs = 120_000 }) {
+export async function callProvider({ config, credentials, provider, model, messages, maxTokens, send = globalThis.fetch, timeoutMs = 120_000, maxBytes = MAX_BODY }) {
   const p = config.providers[provider];
   if (!p) throw new ProxyError('provider', 'unknown provider; refusing');
   const key = credentials.get(provider);
@@ -19,7 +19,7 @@ export async function callProvider({ config, credentials, provider, model, messa
   const body = { model, messages, max_tokens: maxTokens, usage: { include: true } };
   let res; let text;
   try {
-    res = await fetchFn(`${p.base_url}/chat/completions`, {
+    res = await send(`${p.base_url}/chat/completions`, {
       method: 'POST',
       headers: { 'content-type': 'application/json', authorization: `Bearer ${key}` },
       body: JSON.stringify(body),

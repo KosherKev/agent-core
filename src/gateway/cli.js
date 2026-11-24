@@ -26,10 +26,10 @@ export const USAGE = `usage: agent <command>
 export const EXIT = Object.freeze({ OK: 0, FAILED: 1, NOT_IMPLEMENTED: 2, USAGE: 64 });
 
 /**
- * Start the gateway process from config. deps are injectable for tests: { getPeerUid, fetchFn, priceFile, now }.
+ * Start the gateway process from config. deps are injectable for tests: { getPeerUid, transport, priceFile, now }.
  * Fails closed: a bad config, credential file or ledger directory throws before anything listens.
  */
-export async function startGateway({ home = agentHome(), getPeerUid = unknownPeerUid, fetchFn, priceFile = DEFAULT_PRICE_FILE, now = Date.now, log = () => {} } = {}) {
+export async function startGateway({ home = agentHome(), getPeerUid = unknownPeerUid, transport, priceFile = DEFAULT_PRICE_FILE, now = Date.now, log = () => {} } = {}) {
   const loaded = loadConfig(home);
   if (!loaded.valid) throw new Error(`config invalid: ${loaded.errors[0]}`);
   const config = loaded.config;
@@ -39,7 +39,7 @@ export async function startGateway({ home = agentHome(), getPeerUid = unknownPee
   if (!table) throw new Error(`price table unusable: ${error}`);
   const store = createFileLedgerStore(config.ledger_dir, { now });
   const runs = createRunStore(config.runs_dir, { now });
-  const api = createGatewayApi({ config, store, runs, credentials, priceTable: table, now, fetchFn, log: (l) => log(redact(l)), makeSink: (runId) => createSpendSink(join(config.runs_dir, `${runId.replace(/:/g, '_')}.spend.jsonl`), redact) });
+  const api = createGatewayApi({ config, store, runs, credentials, priceTable: table, now, transport, log: (l) => log(redact(l)), makeSink: (runId) => createSpendSink(join(config.runs_dir, `${runId.replace(/:/g, '_')}.spend.jsonl`), redact) });
   const gw = createGatewayServer({ api, config, getPeerUid, log: (l) => log(redact(l)) });
   await gw.start();
   return { gw, api, config };
