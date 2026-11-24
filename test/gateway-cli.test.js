@@ -135,9 +135,13 @@ test('status: an unreadable config.json is "not readable by this user" (expected
   try {
     if (process.getuid?.() === 0) { t.skip('root ignores file modes'); return; }
     const den = cap();
-    assert.equal(await main(['status'], { env, io: den.io }), EXIT.FAILED);
+    assert.equal(await main(['status'], { env, io: den.io }), EXIT.OK, 'the denied state is expected for the runner: exit 0 (round 4 item 4); doctor is the real health check');
     const text = den.out.join('\n');
     assert.match(text, /not readable by this user \(expected for the runner/); assert.match(text, /agent doctor --gateway-user/);
     assert.doesNotMatch(text, /INVALID|EACCES/);
   } finally { chmodSync(cfg, 0o600); }
+  // any other failure still exits non-zero: a missing config is not the expected runner state
+  const missing = cap();
+  assert.equal(await main(['status'], { env: { AGENT_HOME: newHome() }, io: missing.io }), EXIT.FAILED);
+  assert.match(missing.out.join('\n'), /config: INVALID/);
 });
