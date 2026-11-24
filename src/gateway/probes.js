@@ -6,7 +6,8 @@ import { REPO_ROOT } from '../self-model.js';
 import { request } from './client.js';
 import { loadConfig } from './config.js';
 import { realStat } from './layout.js';
-import { resolveGroup, processInfo } from './sys.js';
+import { resolveGroup, resolveUser, processInfo } from './sys.js';
+import { readDiscovery } from './discovery.js';
 
 /** What one attempt at touching a protected path came to: 'denied' (the kernel said no), 'missing', 'allowed', or 'error:<code>'. */
 const verdictOf = (e) => (e?.code === 'EACCES' || e?.code === 'EPERM' ? 'denied' : e?.code === 'ENOENT' || e?.code === 'ENOTDIR' ? 'missing' : `error:${e?.code ?? 'unknown'}`);
@@ -18,6 +19,9 @@ export function realProbes({ pingTimeoutMs = 5000 } = {}) {
     readConfig: (home) => loadConfig(home),
     stat: realStat,
     resolveGroup,
+    resolveUser,
+    /** The gateway's discovery file as a validated object, or null (missing, unreadable or malformed). */
+    readDiscovery,
     /** The real handshake over the socket (through client.js). Rejects when the server refuses, closes or stays silent. */
     ping: (socketPath) => request(socketPath, 'ping', {}, { timeoutMs: pingTimeoutMs }),
     tryRead(path) { try { closeSync(openSync(path, 'r')); return 'allowed'; } catch (e) { return verdictOf(e); } },

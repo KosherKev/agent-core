@@ -76,6 +76,10 @@
       "path": "src/gateway/credentials.js"
     },
     {
+      "name": "gateway/discovery",
+      "path": "src/gateway/discovery.js"
+    },
+    {
       "name": "gateway/doctor",
       "path": "src/gateway/doctor.js"
     },

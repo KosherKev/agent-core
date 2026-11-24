@@ -85,3 +85,39 @@ test('bin/agent is a real executable: doctor against an empty home exits 1, init
   assert.equal(r.status, 1); assert.match(r.stderr, /refused because doctor failed/);
   assert.equal(spawnSync(process.execPath, [bin, 'upgrade'], { env, encoding: 'utf8' }).status, 2);
 });
+
+test('agent run requires the FULL doctor: a partial pass is refused', async () => {
+  const partial = async () => ({ ok: true, partial: { run: 2, of: 8 }, notes: [], checks: [{ id: 'a', name: 'config valid', ok: true, why: 'fine', fix: null }] });
+  const c = cap();
+  assert.equal(await main(['run', '--only', 'a'], { env: { AGENT_HOME: newHome() }, io: c.io, deps: { doctor: partial } }), EXIT.FAILED);
+  assert.match(c.err.join('\n'), /refused because doctor failed/);
+});
+
+test('doctor --only prints PARTIAL and exits non-zero when a selected check fails, zero when the selected ones pass', async () => {
+  const mk = (ok) => async () => ({ ok, partial: { run: 1, of: 8 }, notes: [], checks: [{ id: 'a', name: 'config valid', ok, why: ok ? 'fine' : 'bad', fix: ok ? null : 'fix it' }] });
+  const a = cap(); assert.equal(await main(['doctor', '--only', 'a'], { env: { AGENT_HOME: newHome() }, io: a.io, deps: { doctor: mk(true) } }), EXIT.OK);
+  assert.match(a.out.join('\n'), /PARTIAL: 1 of 8 checks run/); assert.ok(!a.out.join('\n').includes('all checks passed'));
+  const b = cap(); assert.equal(await main(['doctor', '--only', 'a'], { env: { AGENT_HOME: newHome() }, io: b.io, deps: { doctor: mk(false) } }), EXIT.FAILED);
+  assert.match(b.out.join('\n'), /PARTIAL: 1 of 8 checks run; 1 FAILED/);
+});
+
+test('doctor passes --gateway-user to the doctor, rejects a malformed one, and never takes the gateway identity from the environment', async () => {
+  let seen; const spy = async (o) => { seen = o; return { ok: true, checks: [], partial: null, notes: [] }; };
+  await main(['doctor', '--gateway-user', 'agentgw'], { env: { AGENT_HOME: newHome(), AGENT_GATEWAY_USER: 'evil', AGENT_GATEWAY_SOCKET: '/tmp/x.sock' }, io: cap().io, deps: { doctor: spy } });
+  assert.equal(seen.gatewayUser, 'agentgw');
+  const c = cap();
+  assert.equal(await main(['doctor', '--gateway-user', 'bad name;rm'], { env: { AGENT_HOME: newHome() }, io: c.io, deps: { doctor: spy } }), EXIT.USAGE);
+  seen = undefined;
+  await main(['doctor'], { env: { AGENT_HOME: newHome(), AGENT_GATEWAY_USER: 'evil' }, io: cap().io, deps: { doctor: spy } });
+  assert.equal(seen.gatewayUser, undefined);
+});
+
+test('doctor with an unreadable config, AGENT_GATEWAY_SOCKET set and no --gateway-user refuses the trust checks without touching the socket', async () => {
+  let pinged = 0;
+  const probes = { readConfig: () => ({ valid: false, errors: ['denied'], config: null, denied: true }), ping: async () => { pinged += 1; return { ok: true }; }, uid: () => 2002, stat: () => ({ ok: false, code: 'ENOENT' }), resolveGroup: () => null, lockedChecksum: () => ({ sha256: 'a'.repeat(64), files: 1 }) };
+  const c = cap();
+  const code = await main(['doctor'], { env: { AGENT_HOME: newHome(), AGENT_GATEWAY_SOCKET: '/tmp/impostor.sock' }, io: c.io, deps: { probes } });
+  assert.equal(code, EXIT.FAILED); assert.equal(pinged, 0);
+  assert.match(c.out.join('\n'), /--gateway-user/);
+  for (const id of ['b', 'c', 'd', 'f']) assert.match(c.out.join('\n'), new RegExp(`FAIL \\(${id}\\)`));
+});

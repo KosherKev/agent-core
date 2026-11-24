@@ -1,4 +1,5 @@
 import { join } from 'node:path';
+import { randomBytes } from 'node:crypto';
 import { agentHome, loadConfig } from './config.js';
 import { runInit } from './init.js';
 import { runDoctor, formatDoctor } from './doctor.js';
@@ -19,8 +20,10 @@ import { makeRedactor } from './credentials.js';
 
 export const USAGE = `usage: agent <command>
   init           create AGENT_HOME, config.json and directories (never overwrites)
-  doctor         run the boundary checks as the runner user (exit 1 if any fails); --only a,b,f limits it
-                 set AGENT_GATEWAY_SOCKET=<socket_dir>/gateway.sock when config.json is unreadable by you
+  doctor         run the boundary checks as the runner user (exit 1 if any fails)
+                 --gateway-user <name>  who the gateway is; REQUIRED when config.json is unreadable by you (the normal runner case)
+                 AGENT_GATEWAY_SOCKET=<socket_dir>/gateway.sock is only a location hint, never trusted
+                 --only a,b,f  runs part of the checks: prints PARTIAL and is never a full pass
   status         show config, gateway reachability and ledger totals
   ledger:report  print the per-grant ledger report
   gateway        run the gateway (as the gateway user)
@@ -47,7 +50,8 @@ export async function startGateway({ home = agentHome(), getPeerUid, serverOpts 
   const runnerGid = resolveGroup(config.runner_group);
   const access = getPeerUid ? 'kernel-permissions+peer-uid-probe' : 'kernel-permissions-only (no peer-uid probe configured)';
   const layoutInfo = () => ({ config_version: config.config_version, home: config.home, socket_dir: config.socket_dir, socket_path: config.socket_path, credentials_file: config.credentials_file, ledger_dir: config.ledger_dir, runs_dir: config.runs_dir, pid_file: config.pid_file, gateway_uid: config.identities.gateway_uid, runner_group: config.runner_group, runner_gid: runnerGid });
-  const api = createGatewayApi({ config, store, runs, credentials, priceTable: table, now, transport, access, layoutInfo, log: (l) => log(redact(l)), makeSink: (runId) => createSpendSink(join(config.runs_dir, `${runId.replace(/:/g, '_')}.spend.jsonl`), redact) });
+  const instanceId = randomBytes(16).toString('hex');
+  const api = createGatewayApi({ config, store, runs, credentials, priceTable: table, now, transport, access, layoutInfo, instanceId, log: (l) => log(redact(l)), makeSink: (runId) => createSpendSink(join(config.runs_dir, `${runId.replace(/:/g, '_')}.spend.jsonl`), redact) });
   const gw = createGatewayServer({ api, config, getPeerUid, log: (l) => log(redact(l)), ...serverOpts });
   await gw.start();
   return { gw, api, config };
@@ -60,7 +64,9 @@ export async function startGateway({ home = agentHome(), getPeerUid, serverOpts 
 export async function main(argv, { env = process.env, io = { out: console.log, err: console.error }, deps = {} } = {}) {
   const [cmd] = argv;
   const home = agentHome(env);
-  const doctorFor = (only) => (deps.doctor ?? (() => runDoctor({ home, probes: deps.probes ?? realProbes(), socketPath: env.AGENT_GATEWAY_SOCKET, only })))();
+  const flag = (name) => { const i = argv.indexOf(name); return i < 0 ? undefined : String(argv[i + 1] ?? ''); };
+  const gwUserArg = flag('--gateway-user');
+  const doctorFor = (only) => (deps.doctor ?? (() => runDoctor({ home, probes: deps.probes ?? realProbes(), socketPath: env.AGENT_GATEWAY_SOCKET, only, gatewayUser: gwUserArg })))({ only, gatewayUser: gwUserArg });
   const doctor = () => doctorFor(undefined);
   try {
     switch (cmd) {
@@ -70,6 +76,7 @@ export async function main(argv, { env = process.env, io = { out: console.log, e
         return EXIT.OK;
       }
       case 'doctor': {
+        if (gwUserArg !== undefined && !/^[A-Za-z_][A-Za-z0-9_.-]{0,31}$/.test(gwUserArg)) { io.err('agent doctor: --gateway-user takes a user name'); return EXIT.USAGE; }
         const i = argv.indexOf('--only');
         const only = i >= 0 ? String(argv[i + 1] ?? '').split(',').map((x) => x.trim()).filter(Boolean) : undefined;
         if (i >= 0 && (!only.length || only.some((x) => !/^[a-h]$/.test(x)))) { io.err('agent doctor: --only takes a comma list of check ids a to h'); return EXIT.USAGE; }
@@ -97,7 +104,7 @@ export async function main(argv, { env = process.env, io = { out: console.log, e
       case 'run': {
         // No flag, argument or environment variable skips this. A failing doctor blocks every run.
         const r = await doctor();
-        if (!r.ok) { io.err(formatDoctor(r)); io.err('agent run: refused because doctor failed'); return EXIT.FAILED; }
+        if (!r.ok || r.partial) { io.err(formatDoctor(r)); io.err('agent run: refused because doctor failed'); return EXIT.FAILED; }
         io.err(`agent run: ${NOT_IMPLEMENTED}`);
         return EXIT.NOT_IMPLEMENTED;
       }
@@ -105,8 +112,18 @@ export async function main(argv, { env = process.env, io = { out: console.log, e
       case 'gateway': {
         const { gw, config } = await (deps.startGateway ?? startGateway)({ home, log: (l) => io.err(l) });
         const proc = deps.proc ?? process;
-        const down = async () => { try { await gw.stop(); } finally { proc.exit(0); } }; // clean shutdown removes the pid file and the socket
-        proc.once('SIGTERM', down); proc.once('SIGINT', down);
+        // First signal: graceful (finish in-flight calls for up to shutdown_grace_ms, then destroy what is left). Second signal: destroy everything and exit now.
+        // Both remove the pid file, the socket and the discovery file; the 'exit' hook does the same for any other exit that can run code.
+        let signals = 0;
+        const down = () => {
+          signals += 1;
+          if (signals === 1) { log0('gateway stopping (send the signal again to stop at once)'); gw.stop().catch(() => {}).finally(() => proc.exit(0)); return; }
+          try { gw.stop({ force: true }); } catch { /* exiting anyway */ }
+          proc.exit(0);
+        };
+        const log0 = (l) => io.err(l);
+        for (const sig of ['SIGTERM', 'SIGINT', 'SIGHUP']) proc.on(sig, down);
+        proc.on('exit', () => { try { gw.cleanupSync?.(); } catch { /* best effort */ } });
         io.out(`gateway running on ${config.socket_path} (uid ${typeof process.getuid === 'function' ? process.getuid() : '?'}); Ctrl-C to stop`);
         return null; // keeps running; the server holds the process open
       }

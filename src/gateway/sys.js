@@ -26,6 +26,22 @@ export function resolveGroup(group) {
   return null;
 }
 
+/** A user name to a uid, from /etc/passwd, then `id -u`. null when unknown (callers fail closed). */
+export function resolveUser(name) {
+  if (typeof name !== 'string' || !/^[A-Za-z_][A-Za-z0-9_.-]{0,31}$/.test(name)) return null;
+  try {
+    for (const line of readFileSync('/etc/passwd', 'utf8').split('\n')) {
+      const c = line.split(':');
+      if (c[0] === name && /^\d+$/.test(c[2] ?? '')) return Number(c[2]);
+    }
+  } catch { /* no /etc/passwd: ask `id` */ }
+  try { // the system's own answer (covers directory-service users); `id -u` prints only the number
+    const out = execFileSync('id', ['-u', name], { encoding: 'utf8', timeout: 5000, stdio: ['ignore', 'pipe', 'ignore'] }).trim();
+    if (/^\d+$/.test(out)) return Number(out);
+  } catch { /* unknown user */ }
+  return null;
+}
+
 /** { pid, uid, cmdline } of a live process, or null (not running, or cannot be read). cmdline arguments are joined with single spaces. */
 export function processInfo(pid) {
   if (!Number.isSafeInteger(pid) || pid < 1) return null;

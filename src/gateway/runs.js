@@ -24,8 +24,16 @@ export function createRunStore(dir, { now = Date.now } = {}) {
     exists: (runId) => existsSync(fileOf(runId)),
     start(runId, { provider, model } = {}) { write(runId, { type: 'run_start', start_ms: now(), ...(provider ? { provider } : {}), ...(model ? { model } : {}) }); },
     setModel(runId, provider, model) { write(runId, { type: 'model', provider, model }); },
-    /** Audit line only (ids and cost, never message content): which request_id was served and how it ended. */
-    recordRequest(runId, requestId, { ok, code, cost_micro } = {}) { write(runId, { type: 'request', request_id: requestId, ok: ok === true, ...(code ? { code: String(code).slice(0, 40) } : {}), ...(Number.isSafeInteger(cost_micro) ? { cost_micro } : {}) }); },
+    /** One line per finished modelCall: the request_id, its parameter fingerprint and how it ended, with the (already redacted) result so a retry can be answered after the memory cache forgot it. */
+    recordRequest(runId, requestId, { ok, code, cost_micro, fp, result, message } = {}) {
+      write(runId, { type: 'request', request_id: requestId, ok: ok === true, ...(code ? { code: String(code).slice(0, 40) } : {}), ...(Number.isSafeInteger(cost_micro) ? { cost_micro } : {}), ...(typeof fp === 'string' ? { fp } : {}), ...(result !== undefined ? { result } : {}), ...(typeof message === 'string' ? { message: message.slice(0, 300) } : {}) });
+    },
+    /** The last recorded outcome for a request_id on this run (the durable fallback behind the gateway's bounded memory cache), or null. Throws if the file is unreadable. */
+    findRequest(runId, requestId) {
+      const ls = lines(runId);
+      for (let i = ls.length - 1; i >= 0; i -= 1) if (ls[i].type === 'request' && ls[i].request_id === requestId) return ls[i];
+      return null;
+    },
     end(runId, outcome) {
       if (!OUTCOMES.includes(outcome)) throw new RangeError('outcome must be one of ' + OUTCOMES.join(', '));
       write(runId, { type: 'run_end', end_ms: now(), outcome });
