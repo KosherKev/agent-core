@@ -162,7 +162,10 @@ export function createGatewayServer({ api, config, getPeerUid, log = () => {}, c
         let timer = null; let done = false;
         const finish = () => { if (done) return; done = true; clearTimeout(timer); destroyAll(); cleanupSync(); res(); };
         finishStop = finish;
-        server.close(() => finish()); // fires once every connection has ended
+        // Done only when every connection has ended AND every detached provider call has persisted its outcome (a client that hung up mid-call
+        // does not end the call). A call still running at the deadline is left reserved; a retry after restart is answered as "outcome unknown".
+        const closed = new Promise((r) => server.close(() => r()));
+        Promise.all([closed, Promise.resolve().then(() => api.drain?.()).catch(() => {})]).then(() => finish());
         for (const [s, st] of conns) if (!st.inFlight) s.destroy();
         timer = setTimeout(finish, shutdownGraceMs);
       });
