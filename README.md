@@ -17,7 +17,7 @@ Tenets: modular (parts swap behind contracts), correctable (every change reversi
 4. **Grant** (`grant`, ADR-0004): one per task; repos and paths, budget, expiry, allowed risk tiers (R3).
 5. **Self-model** (`self-model`, `self-model.json`, ADR-0005): generated index of modules (nested `src/` included), contracts, ADRs and, where manifests exist, module capabilities.
 
-Also a contract, added after the seven seams were fixed: **Task spec** (`task-spec`, ADR-0006): goal, repo identity (`host/owner/name`), optional branch, and a grant (embedded or by reference).
+Also a contract, added after the seven seams were fixed: **Task spec** (`task-spec`, ADR-0006): goal, repo identity (`host/owner/name`), optional branch, and a grant (embedded or by reference). `repo` is strict (no `..`, no `.git` suffix, ASCII only); `src/task-spec.js` adds the `grant_ref` vs `grant.task_id` cross-check. Grant `scope.paths` entries are literal prefixes, not globs (ADR-0004).
 6. **Locked acceptance suite** (`acceptance/`): runnable by the builder, not editable by it. Protected by `.github/CODEOWNERS` and the `protect-locked-paths` workflow (R4); see "Locked-path guard" below.
 7. **Overseer/gate boundary** (rules R2 and R4): the line between the builder and whoever answers gates. This repo defines only what crosses it (the contracts above); the overseer itself lives elsewhere and is out of scope.
 
@@ -40,7 +40,7 @@ self-model.json   generated; do not hand-edit
 ```
 npm ci
 npm run build            # regenerate self-model.json
-npm run check:self-model # fail if self-model.json is stale
+npm run check:self-model # fail if self-model.json is stale or a capability manifest is broken
 npm test                 # unit tests + locked acceptance suite
 ```
 Dependencies are exact-pinned and locked in `package-lock.json`; install with `npm ci`.

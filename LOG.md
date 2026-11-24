@@ -1,5 +1,42 @@
 # LOG
 
+## 2026-11-23 (Contract gap follow-ups)
+### What was done
+Branch task/contract-gap-followups off origin/main 6f6837c (merge of task/contract-gaps; task-spec schema and `issue_kind` confirmed present). One commit per issue.
+1. Repo pattern (649ec9a): `task-spec` `repo` is strict `host/owner/name`: DNS-style host, owner and name 1 to 100 of `[A-Za-z0-9_.-]`, segment `.`/`..` rejected, name ending `.git` (any case) rejected, no empty segments, whitespace (incl. trailing newline), backslash, percent, control chars, non-ASCII. 25 new invalid fixtures (one per rule, several variants) and `test/task-spec-repo.test.js`: each `repo-*` invalid fixture must fail ONLY with a `/repo must match pattern` error and pass once `repo` is replaced by a good value; accepted shapes listed too. ADR-0006 addendum.
+2. grant_ref cross-check (new `src/task-spec.js`, `validateTaskSpec`, `checkGrantRef`): schema first, then `grant_ref` must equal `grant.task_id` when both exist. `test/task-spec-grant-ref.test.js`: match, mismatch, one-only, schema-failure-first. `self-model.json` regenerated (new module). ADR-0006 addendum.
+3. scope.paths: ADR-0004 addendum (literal prefixes, no globs, `src/**` matches nothing, schema does not reject glob chars); new valid fixture `fixtures/grant/valid/prefix-paths.json` (`src/`, `docs/`); `test/grant-prefix-paths.test.js` via the public `confine` API (prefix allows a write, `src/**` allows none, schema accepts glob chars). No behaviour change.
+4. Self-model manifests: `loadCapabilities(root)` in `src/self-model.js` collects errors (import failure, no `*_CAPABILITIES` export, invalid manifest via `validateManifest`); `scripts/build-self-model.js` prints `<file>: <error>` and exits 1 for build and `--check`; missing manifest stays optional. New `--root <dir>` option so tests use a temp tree. `test/self-model-broken-manifest.test.js` (temp dirs only). ADR-0005 addendum.
+README.md updated.
+
+### Commands run and results (with counts)
+- Baseline origin/main 6f6837c `npm test`: 400 tests, 400 pass, 0 fail, 0 skipped on Node 22.23.5 and on Node 24.22.3.
+- Final `npm test`: 470 tests, 470 pass, 0 fail, 0 skipped on Node 22.23.5 and on Node 24.22.3 (+70 new, no skips added).
+- `npm run build` (21 modules, 6 contracts, 6 ADRs) leaves tracked files unchanged apart from the intended self-model.json; `npm run check:self-model` up to date; `npm audit --omit=dev`: 0 vulnerabilities.
+- Backward compatibility: all baseline tests pass unedited, including every pre-existing fixture across all contracts (task-spec valid/embedded-grant and grant-ref-with-branch still validate; the 9 older invalid task-spec fixtures still rejected); acceptance suite untouched and green.
+
+### Decisions and why
+- Mismatch check lives in `checkGrantRef`, and `validateTaskSpec` takes an optional schema step: the v1 schema (oneOf) already refuses a spec with both `grant` and `grant_ref`, so the mismatch branch is unreachable through the real schema; tests exercise it directly and show the real schema refuses first. Schema not loosened (more restrictive).
+- A capability file with no `*_CAPABILITIES` export, or an invalid manifest, is now an error too (previously silently omitted); an empty exported array is still fine.
+- `src/**` fixture: `fixtures/grant/valid/basic.json` and `fixtures/task-spec/valid/embedded-grant.json` left UNCHANGED. `acceptance/contracts.test.js` (locked) iterates every grant fixture and `test/task-spec.test.js` loads the grant fixture, so the restrictive choice was to add a new fixture, not edit.
+- Adding a valid grant fixture changes nothing for locked tests (they only require valid ones validate).
+
+### Fixtures touched (and why)
+- Added: `fixtures/grant/valid/prefix-paths.json`; 25 files `fixtures/task-spec/invalid/repo-*.json` (backslash, control-char, empty-host/name/owner, host-empty-label/leading-hyphen/trailing-hyphen-label/underscore, leading/trailing-space, trailing-newline, tab, name-dot, name-dotdot, name-dot-git, name-dot-git-upper, name-only-dot-git, name-too-long, owner-dot, owner-dotdot, owner-too-long, non-ascii, non-ascii-host, percent).
+- Modified or deleted: none. No previously valid fixture became invalid.
+
+### CHANGED LOCKED PATHS (expected: none)
+None. `git diff --name-only origin/main...HEAD` touches no file under src/grant/, src/ledger/, config/, acceptance/, .github/, CODEOWNERS, src/builder-adapter.js, src/builder-confine.js, src/validators.js, test/builder-mock.js, or any locked test.
+
+### Not verified
+- The guard on a real PR (not runnable here).
+- `npm test` on Node 22 prints TAP, not the summary format Node 24 uses; counts were read from its TAP totals.
+
+### Open questions for Kevin
+- Adopting `validateTaskSpec` in the builder adapter needs a locked-code edit (src/builder-adapter.js); not done.
+- Should the schema ever allow `grant_ref` alongside an embedded `grant` (so the cross-check becomes live)? Left refused.
+- Glob support stays rejected per decision; fixtures with `src/**` still allow no writes.
+
 ## 2026-11-23 (Additive contract gap cleanup)
 ### What was done
 Branch task/contract-gaps off origin/main a797766 (`.github/locked-paths.txt` there lists `src/ledger/`; checked). One commit per issue. Only schemas/, docs/adr/, fixtures/, src/self-model.js, self-model.json, new tests, README.md and LOG.md changed.
