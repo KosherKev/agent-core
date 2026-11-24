@@ -34,3 +34,11 @@ The schema allows `low`, `medium`, `high` and `payments`. The only check anywher
 
 ### `budget`
 `max_usd` is a JSON number; the meter requires a finite number greater than zero and rounds it down to whole micro-USD. `max_tool_calls` must be a positive integer. A decimal-string `max_usd` is not accepted by the meter (see LOG.md, 2026-11-23 additive contract gap cleanup).
+
+## Addendum 2026-11-23 (follow-up): `scope.paths` entries are literal prefixes, no globs
+Decision (Kevin): no glob support. Every path rule so far produced a bypass, so prefix-only stays.
+- Each `scope.paths` entry is a literal path prefix matched on whole segments. Glob characters (`*`, `?`, `[`, `{`) are NOT interpreted and the schema does not reject them.
+- The only special spellings are the ones listed above (`.`, `./`, the empty string, `*`, `**` meaning every path).
+- `src/**` therefore matches nothing today: a grant with that entry allows no writes under `src`. To allow writes under `src`, write `src` or `src/`.
+- `fixtures/grant/valid/basic.json` (and the embedded copy in `fixtures/task-spec/valid/embedded-grant.json`) still use `src/**`, left untouched: they are schema-valid, and the acceptance suite iterates every grant fixture. `fixtures/grant/valid/prefix-paths.json` is the example that actually allows writes (`src/`, `docs/`).
+- `test/grant-prefix-paths.test.js` asserts this through the public `confine` API.
