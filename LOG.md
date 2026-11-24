@@ -1,5 +1,31 @@
 # LOG
 
+## 2026-11-24 (Gateway docs and doctor message corrections)
+Branch task/gateway-docs-fixes, based on origin/main 69547a4 (PR #16). Baseline on origin/main before changes: `npm test` 623 tests, 623 pass, 0 fail on Node 22.23.5 and on Node 24.22.3 (after `npm ci --ignore-scripts` in the worktree).
+
+### What was done per item
+1. docs/gateway.md step 5: `export AGENT_HOME=<agent-home>` added before the doctor run, with the reason. Verified in code: `agentHome()` (src/gateway/config.js) returns `AGENT_HOME` when set and non-blank, else `~/.agent`; `runDoctor` defaults `home` to it and `probes.readConfig` calls `loadConfig(home)`, which marks `denied` only for EACCES/EPERM. So AGENT_HOME is the variable the runner-side doctor reads. No gap found there. The docs also state that a MISSING file fails (a) and skips (b), (c), (d), (f) (verified in doctor.js: only the `denied` branch takes the ping path).
+2. Check (a), config.json MISSING (ENOENT, not denied): reason now reads "config.json is missing. If you are the runner, set AGENT_HOME to the gateway's AGENT_HOME. (cannot read ... (ENOENT))"; the `agent init` fix text is unchanged. Invalid/unparseable config keeps its old reason. New test in test/gateway-doctor.test.js covers missing (new wording, init fix kept) and denied (still passes via ping). This is the only behaviour change.
+3. Install subsection added to Setup (root-owned /opt/agent-core, `sudo npm ci --omit=dev --ignore-scripts`, checkout + `rev-parse HEAD` to pin and record, CLI by full path, why).
+4. Proof section: run doctor as the normal user, never sudo or as the gateway user; chmod 755 case expects six failures (a)-(f); chmod 666 fails (c) with "socket mode is 666, it must be 660".
+5. Step 6b replaced with the replay procedure; commands copied verbatim from the spec (shell-level backslash-n kept as `\n` inside the node strings); marked as not run on a real VM.
+
+### Verified in the code vs copied from the spec unverified
+Verified: agentHome() and the config probe behaviour (item 1); the missing-versus-denied branch in doctor.js (item 2); wording tested. Copied unverified: the item 5 commands and their expected outcomes; the six-failure expectation and the "socket mode is 666" text (not re-derived from the code or run); the install steps (not run; no sudo was used here); the claim that socket_dir 0750 prevents a normal user binding there.
+
+### Gaps / deviations
+- No agentHome() gap: AGENT_HOME is what the doctor reads.
+- Existing docs tell macOS users to run `sudo agent doctor --only f`, which conflicts with "never under sudo". Restrictive choice: kept that existing line (removing it would lose the only macOS (f) route) and named it, plus step 7's deliberate gateway-user run, as the explicit exceptions in the "never sudo" sentence. Not verified on macOS.
+- Existing Setup/proof lines still say `agent` rather than the full path; the install subsection says `agent` there means `node /opt/agent-core/bin/agent`. Further rewriting was left to round 3.
+- README.md does not quote the proof commands; not changed. self-model.json not changed (see below).
+
+### Commands run and counts
+- Baseline (origin/main): Node 22.23.5 and Node 24.22.3, 623 tests, 623 pass, 0 fail.
+- After changes: Node 22.23.5 `npm test` 624 tests, 624 pass, 0 fail; Node 24.22.3 624 tests, 624 pass, 0 fail (one new test).
+- `npm run check:self-model`: up to date (no regeneration needed). `npm audit --omit=dev`: 0 vulnerabilities.
+- `git diff --name-only origin/main...HEAD` (before this LOG commit): docs/gateway.md, src/gateway/doctor.js, test/gateway-doctor.test.js. No locked path.
+- Setup note: `npm ci --ignore-scripts` was run in the worktree to get node_modules.
+
 ## 2026-11-24 (Gateway M1a fix round 2)
 Branch `task/gateway-m1a-fixes-2`, based on origin/main c23f7ed (PR #15). Works only in `src/gateway/`, `bin/agent` (unchanged), `docs/gateway.md`, README.md, `test/gateway-*.test.js`, LOG.md and `self-model.json`.
 
