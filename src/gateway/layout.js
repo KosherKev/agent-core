@@ -13,14 +13,15 @@ export function realStat(path) {
   } catch (e) { return { ok: false, code: e?.code ?? 'ERR' }; }
 }
 
-const miss = (what, st) => ({ why: `${what} cannot be inspected (${st.code})`, fix: `check that ${what} exists and is reachable` });
+const f = (v) => (v === undefined || v === null ? 'not reported' : v);
+const miss = (what, st) => ({ why: `${what} cannot be inspected (${st?.code ?? 'no reason given'})`, fix: `check that ${what} exists and is reachable` });
 
 /** Each function returns an array of { why, fix }: empty means the item is exactly as required. */
 export function homeProblems(st, home, gatewayUid, { deniedOk = false } = {}) {
   if (!st.ok) return deniedOk && (st.code === 'EACCES' || st.code === 'EPERM') ? [] : [miss('AGENT_HOME', st)];
   const out = [];
   if (st.type !== 'dir') out.push({ why: 'AGENT_HOME is not a plain directory', fix: `remove ${home} and run agent init as the gateway user` });
-  if (st.uid !== gatewayUid) out.push({ why: `AGENT_HOME is owned by uid ${st.uid}, the gateway uid is ${gatewayUid}`, fix: `chown ${gatewayUid} ${home}  (run as root)` });
+  if (st.uid !== gatewayUid) out.push({ why: `AGENT_HOME is owned by uid ${f(st.uid)}, the gateway uid is ${gatewayUid}`, fix: `chown ${gatewayUid} ${home}  (run as root)` });
   if ((st.mode & 0o777) !== MODES.home) out.push({ why: `AGENT_HOME mode is ${oct(st.mode)}, it must be 700 (no group or other access at all)`, fix: `chmod 700 ${home}  (run as the gateway user)` });
   return out;
 }
@@ -29,7 +30,7 @@ export function configFileProblems(st, file, gatewayUid, { deniedOk = false } = 
   if (!st.ok) return deniedOk && (st.code === 'EACCES' || st.code === 'EPERM') ? [] : [miss('config.json', st)];
   const out = [];
   if (st.type !== 'file') out.push({ why: 'config.json is not a regular file', fix: `replace ${file} with a regular file owned by the gateway user` });
-  if (st.uid !== gatewayUid) out.push({ why: `config.json is owned by uid ${st.uid}, the gateway uid is ${gatewayUid}`, fix: `chown ${gatewayUid} ${file}  (run as root)` });
+  if (st.uid !== gatewayUid) out.push({ why: `config.json is owned by uid ${f(st.uid)}, the gateway uid is ${gatewayUid}`, fix: `chown ${gatewayUid} ${file}  (run as root)` });
   if ((st.mode & 0o022) !== 0) out.push({ why: `config.json mode is ${oct(st.mode)}: group or other can write it`, fix: `chmod 600 ${file}  (run as the gateway user)` });
   return out;
 }
@@ -38,9 +39,9 @@ export function socketDirProblems(st, dir, gatewayUid, runnerGid) {
   if (!st.ok) return [miss('socket_dir', st)];
   const out = [];
   if (st.type !== 'dir') out.push({ why: 'socket_dir is not a plain directory', fix: `remove ${dir} and create it as a directory (see docs/gateway.md)` });
-  if (st.uid !== gatewayUid) out.push({ why: `socket_dir is owned by uid ${st.uid}, the gateway uid is ${gatewayUid}`, fix: `chown ${gatewayUid}:<runner_group> ${dir}  (run as root)` });
+  if (st.uid !== gatewayUid) out.push({ why: `socket_dir is owned by uid ${f(st.uid)}, the gateway uid is ${gatewayUid}`, fix: `chown ${gatewayUid}:<runner_group> ${dir}  (run as root)` });
   if (runnerGid === null || runnerGid === undefined) out.push({ why: 'runner_group does not resolve to a gid', fix: 'create the runner group or fix runner_group in config.json' });
-  else if (st.gid !== runnerGid) out.push({ why: `socket_dir group is gid ${st.gid}, runner_group is gid ${runnerGid}`, fix: `chgrp <runner_group> ${dir}  (run as root)` });
+  else if (st.gid !== runnerGid) out.push({ why: `socket_dir group is gid ${f(st.gid)}, runner_group is gid ${runnerGid}`, fix: `chgrp <runner_group> ${dir}  (run as root)` });
   if ((st.mode & 0o777) !== MODES.socketDir) out.push({ why: `socket_dir mode is ${oct(st.mode)}, it must be 750 (runner group can traverse, not create or delete)`, fix: `chmod 750 ${dir}  (run as the gateway user)` });
   return out;
 }
@@ -49,9 +50,9 @@ export function socketProblems(st, path, gatewayUid, runnerGid) {
   if (!st.ok) return [miss('the socket', st)];
   const out = [];
   if (st.type !== 'socket') out.push({ why: 'socket path is not a socket', fix: `remove ${path} and restart the gateway` });
-  if (st.uid !== gatewayUid) out.push({ why: `socket owner is uid ${st.uid}, the gateway uid is ${gatewayUid}`, fix: 'start the gateway under the gateway user' });
+  if (st.uid !== gatewayUid) out.push({ why: `socket owner is uid ${f(st.uid)}, the gateway uid is ${gatewayUid}`, fix: 'start the gateway under the gateway user' });
   if (runnerGid === null || runnerGid === undefined) out.push({ why: 'runner_group does not resolve to a gid', fix: 'create the runner group or fix runner_group in config.json' });
-  else if (st.gid !== runnerGid) out.push({ why: `socket group is gid ${st.gid}, runner_group is gid ${runnerGid}`, fix: `chgrp <runner_group> ${path}  (run as the gateway user, who must be in that group)` });
+  else if (st.gid !== runnerGid) out.push({ why: `socket group is gid ${f(st.gid)}, runner_group is gid ${runnerGid}`, fix: `chgrp <runner_group> ${path}  (run as the gateway user, who must be in that group)` });
   if ((st.mode & 0o777) !== MODES.socket) out.push({ why: `socket mode is ${oct(st.mode)}, it must be 660`, fix: `chmod 660 ${path}  (run as the gateway user)` });
   return out;
 }
