@@ -73,6 +73,13 @@ export function createRunStore(dir, { now = Date.now, fileSync = realFileSync, m
       write(runId, { type: 'request', request_id: requestId, ok: ok === true, ...(code ? { code: String(code).slice(0, 40) } : {}), ...(Number.isSafeInteger(cost_micro) ? { cost_micro } : {}), ...(typeof fp === 'string' ? { fp } : {}), ...(result !== undefined ? { result } : {}), ...(typeof message === 'string' ? { message: message.slice(0, 300) } : {}) });
     },
     /**
+     * The outcome line of a FAILED or released request, flushed like the other durable lines (async; rejects with DurabilityError if the flush fails).
+     * Without it a retry after a power loss could find an earlier `request_reserved` line and say "its reservation is kept" after the reservation was released.
+     */
+    recordRequestFailed(runId, requestId, { code, fp, message } = {}) {
+      return writeDurable(runId, { type: 'request', request_id: requestId, ok: false, ...(code ? { code: String(code).slice(0, 40) } : {}), ...(typeof fp === 'string' ? { fp } : {}), ...(typeof message === 'string' ? { message: message.slice(0, 300) } : {}) });
+    },
+    /**
      * Written BEFORE a modelCall reserves anything or calls the provider: proof that this request_id was started, so a cut-off call is recognisable after a restart
      * and nothing is paid twice. Async and durable: it resolves only after the line is flushed (file, and directory if this write created the file). Rejects with DurabilityError otherwise.
      */
