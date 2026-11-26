@@ -194,9 +194,16 @@ export function createGatewayApi({ config, store, runs, credentials, priceTable,
         } catch (err) { o = { err }; }
         try {
           const e = o.err ? errorOf(o.err) : null;
-          runs.recordRequest(p.run_id, p.request_id, { ok: !e, fp, ...(e ? { code: e.code, message: redact(e.message) } : { cost_micro: o.result.cost_micro, result: redactDeep(o.result, redact) }) });
+          // A failed or released request's outcome line is flushed before the caller hears of it; if that flush fails the caller gets the durability error (fail closed)
+          // and the entry stays pinned in memory. A successful call's outcome line is still written without a flush (the call was paid and settled, so a lost line
+          // can only make a retry say "outcome unknown", never reserve or pay twice).
+          if (e) await runs.recordRequestFailed(p.run_id, p.request_id, { fp, code: e.code, message: redact(e.message) });
+          else runs.recordRequest(p.run_id, p.request_id, { ok: true, fp, cost_micro: o.result.cost_micro, result: redactDeep(o.result, redact) });
           entry.settled = true;
-        } catch { log('request outcome could not be persisted; the entry stays pinned in memory'); }
+        } catch (err2) {
+          if (err2 instanceof DurabilityError) o = { err: new RequestError('request_start_not_durable', 'the outcome of this request could not be made durable on disk; the request failed and is not repeated (fail closed); use a new request_id to try again') };
+          log('request outcome could not be persisted; the entry stays pinned in memory');
+        }
         r.inflight -= 1;
         evict();
         return o;
