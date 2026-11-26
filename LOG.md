@@ -1,5 +1,26 @@
 # LOG
 
+## 2026-11-26 (Gateway round 6: stale durability docs, durable outcome line, release-path tests)
+Branch task/gateway-round-6, based on main 7aa93e0 (round 5 merge). Baseline 665 tests; after: 670 on Node 22.23.5 and 24.22.3. The reviewers' findings reached me second hand; each was checked in the code.
+
+### Per item
+1. Docs finding 1 ("best-effort" `request_reserved`): DONE, verified in code. The word survived only in the outcome-unknown paragraph; the code flushes that line before the provider is called. Rewritten.
+2. Docs finding 2 (directory flushed only when that write created the file): NOT PRESENT in docs/gateway.md at 7aa93e0. The API paragraph already said `openRun` flushes file then directory. The wording exists only as an accurate comment on `writeDurable` in `runs.js` (a later durable write also flushes the directory if the file came from an earlier unflushed write), which I left. I rewrote the paragraph to state the whole order (openRun file+dir, request_start, reserve, request_reserved, provider, outcome line) so it cannot be misread.
+3. Docs finding 3 (cut-off paragraph): DONE, verified. The outcome-unknown text sat after the durability caveat with a leading space, detached from the list. It is now a list bullet and the caveat follows the list.
+4. Outcome line durable: DONE for FAILED or released requests (`runs.recordRequestFailed`, flushed through the same injectable sync; if the flush fails the caller gets `request_start_not_durable` with its own message, and the entry stays pinned). Deviation, on purpose: the SUCCESS outcome line is still written without a flush. Making it fail closed would hand a paid, settled result away as an error; a lost success line can only produce `request_outcome_unknown`, never a second reservation. The spec only asked for failed or released requests. The existing `durabilityError` text says "the provider was not called", which would be false after the provider ran, so the outcome-line failure has its own message under the same code.
+5. Tests (test/gateway-round6.test.js, 5 new): (a) failed `request_reserved` flush: reservation released (budget reserved 0), provider never called, order recorded; (b) retry in the same process and from a second gateway over the same run file: durable failure answer, never "reservation kept", no second reserve; (b2) both flushes fail: still durability error, no second reserve or provider call; (c) failed outcome flush after a provider 500 fails closed with the durability error and is not repeated; (c2) healthy disk: outcome flushed after the provider, plain `provider_rejected` returned. (d) the round 5 order tests pass unchanged (file not edited).
+6. Finding 6 (duplication, `run_file_max_bytes` special case): left alone as instructed.
+
+### What the spec got wrong or left open
+- Finding 2 is not in the docs (above).
+- Power loss is untested. If both the `request_reserved` and outcome flushes fail and power is then lost, a retry may still say "reservation kept" for a released reservation (a wrong message, not a double payment). The docs say so. Kevin's Linux power-loss check remains manual.
+- Open question for Kevin: should a successful call whose outcome flush fails also fail closed? I chose not to (see item 4).
+
+### Verification
+- Changed: src/gateway/api.js, src/gateway/runs.js, docs/gateway.md, test/gateway-round6.test.js, LOG.md. No locked path, no new dependency. self-model.json unchanged (check passes).
+- `npm test`: Node 22.23.5 670 tests, 670 pass, 0 fail, 0 skipped (includes test/grant-adapter.test.js and the locked-paths guard); Node 24.22.3 670/670. `npm run check:self-model` up to date on both. `npm audit --omit=dev` 0 vulnerabilities.
+- Nothing missing on this machine (Mac mini); no servermac-only path or tool was needed.
+
 ## 2026-11-24 (Gateway round 5: durable run file, durable reservation line, review leftovers)
 Branch task/gateway-round-5, based on origin/main 82ba650 (round 4 merge). Baseline before my change was 659 tests (round 4's own count); after: 665 on Node 22.23.5 and 24.22.3.
 The reviewers' claims reached me second hand; each was checked in the code, and what I found is stated per item.
