@@ -809,3 +809,28 @@ None. `git diff --name-only main...HEAD` lists no file under acceptance/, .githu
 
 ## Run-journal issues raised
 Per run, the adapter journals one reservation (free/third-party model data policy), 14 `[kind: contract-gap]` issues, and on the relevant stops `[kind: rate-limit]`, `[kind: refusal]`, `[kind: truncation]`, `[kind: malformed-tool-calls]`. Read-denylist and git-internals refusals are `attempt` entries, not issues. No entries were produced against a real endpoint during this task.
+
+# Gateway docs fixes from the Linux boundary proof (docs only), 2026-11-26
+Branch task/gateway-docs-proof, from origin/main 58d1458. `src/gateway/` is in `.github/locked-paths.txt` there. Only docs/gateway.md and this LOG.md changed.
+
+## What was done per item
+1. Setup (Linux): added `sudo chmod 755 /var/lib/agent-gateway` with a note stating the observed 0750 `agentgw:agentgw` directory and that the proof set it to 755. No reason added.
+2. Added the "Interpreter (Linux)" subsection with finding 2 and the `install` command; Linux examples for `agent init`, `agent gateway` and `agent doctor` now use `/opt/agent-core-node /opt/agent-core/bin/agent`. States that the locked-set checksum (check h) covers the locked files, not the interpreter.
+3. Gateway-user commands use `sudo runuser -u agentgw --`; a note says `sudo -u agentgw` prompted for a password in the proof and is the alternative where sudoers allows it.
+4. "Cannot prove" now lists root-equivalent access (sudo, wheel, docker group, root-owned setuid helpers); added a "Runner account requirement" in Setup.
+5. Socket dir: added a note that the docs and proof use `/run/agent-gateway`, the `agent init` default `/var/run/agent-gateway` is untested on Linux, and `socket_dir` should be set explicitly. Not called a bug.
+6. Added "Proof record" (date, commit af48a90, container not VM, Node v24.22.2, checksum, results list, limits). Step 6b wording replaced (run once in a container; a clean VM re-run with a runner without sudo and docker group is required before M1b). The step 3b "Linux: not verified" is now "confirmed". Step 6b step 4 "not been run on a VM" now says the one real run was in a container. Step 8 says the gateway, `bin/agent` and gateway tests are locked and the checksum differs after.
+7. macOS: docs/gateway.md already says check (f) fails closed on macOS by design and that macOS fsync is weaker than Linux. Changed nothing.
+README.md: its gateway paragraph has no status wording to change; not edited.
+
+## Code changes for Kevin
+None.
+
+## Findings I could not place
+None. Small additions beyond the literal text: in the proof steps the `ls`, `chmod 666` and step-7 doctor commands use `runuser`, and step 7's command passes only `AGENT_HOME` (my choice, not from the proof). The macOS-only `sudo ... --only f` line now names `node /opt/agent-core/bin/agent` since `/opt/agent-core-node` is Linux.
+
+## Commands run and counts
+- `npm ci --ignore-scripts` (node_modules was missing; lockfile only, no new dependencies).
+- `npm test` on Node 22.23.5: 670 tests, 670 pass, 0 fail.
+- `npm test` on Node 24.22.3: 670 tests, 670 pass, 0 fail.
+- Guard `node .github/scripts/locked-paths.mjs <origin/main sha> <branch HEAD sha>`: "no locked paths touched", exit 0.
