@@ -2,7 +2,7 @@
 
 Status: accepted (2026-11-27). Decisions on the five questions are recorded at the end. v1 (ADR-0001, ADR-0004) stays valid and unchanged.
 
-Location: this file waits in `docs/adr-pending/` because `test/self-model.test.js` requires exactly one ADR per contract and lists the six v1 contracts by name. The task that adds the v2 schemas moves this file to `docs/adr/` and replaces that count rule with an explicit coverage rule (every contract is covered by at least one ADR, and an ADR may cover several), in the same reviewed change.
+Location: this file waited in `docs/adr-pending/` because `test/self-model.test.js` required exactly one ADR per contract. It moved here with the v2 schemas (`schemas/v2/`), and that count rule was replaced by an explicit coverage rule in the same change: every contract is covered by at least one ADR, and an ADR may cover several.
 
 ## Context
 Observed in the repo at commit 42f65c6:
@@ -67,3 +67,6 @@ Fixtures for valid and invalid v2 manifests and grants; effect/tier mismatch rej
 3. Remote (HTTP) MCP servers are excluded from the first version. Only local servers run by the gateway from a pinned commit.
 4. `schemas/` is locked by hand. Sequencing: the v2 schemas and fixtures are added first (by the normal pipeline, reviewed and merged by Kevin), then `schemas/` is locked. After that, any schema change is a human change.
 5. The registry lives in `config/trust-registry.json` (already a locked path).
+
+## Addendum 2026-11-27
+(a) `tool_definition` is stored in the MCP manifest so the definition hash can be re-checked. (b) Because `acceptance/` is locked, v2 fixtures are iterated by `test/capability-v2-schemas.test.js`, not by the acceptance suite.

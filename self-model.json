@@ -56,6 +56,10 @@
       "path": "src/builder-redact.js"
     },
     {
+      "name": "capability-v2",
+      "path": "src/capability-v2.js"
+    },
+    {
       "name": "gateway/api",
       "path": "src/gateway/api.js"
     },
@@ -218,6 +222,26 @@
       "name": "task-spec",
       "version": "v1",
       "path": "schemas/v1/task-spec.schema.json"
+    },
+    {
+      "name": "capability-manifest",
+      "version": "v2",
+      "path": "schemas/v2/capability-manifest.schema.json"
+    },
+    {
+      "name": "capability-scopes",
+      "version": "v2",
+      "path": "schemas/v2/capability-scopes.schema.json"
+    },
+    {
+      "name": "grant",
+      "version": "v2",
+      "path": "schemas/v2/grant.schema.json"
+    },
+    {
+      "name": "trust-registry",
+      "version": "v2",
+      "path": "schemas/v2/trust-registry.schema.json"
     }
   ],
   "adrs": [
@@ -250,6 +274,11 @@
       "id": "ADR-0006",
       "title": "Task spec contract",
       "path": "docs/adr/0006-task-spec.md"
+    },
+    {
+      "id": "ADR-0007",
+      "title": "Capability contract v2 (third-party tools, trust and enforcement)",
+      "path": "docs/adr/0007-capability-contract-v2.md"
     }
   ]
 }
