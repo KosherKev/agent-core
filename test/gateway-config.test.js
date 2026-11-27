@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, writeFileSync, statSync, readFileSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { validateConfig, loadConfig, agentHome, defaultConfig, CONFIG_VERSION } from '../src/gateway/config.js';
+import { validateConfig, loadConfig, agentHome, defaultConfig, defaultSocketDir, CONFIG_VERSION } from '../src/gateway/config.js';
 import { runInit } from '../src/gateway/init.js';
 
 const good = () => defaultConfig({ gatewayUid: 10, runnerUid: 20, socketDir: '/run/gw-test', runnerGroup: 'agent-runner' });
@@ -91,4 +91,10 @@ test('new keys: socket_dir, runner_group and limits are validated, defaulted and
   assert.equal(validateConfig({ ...good(), socket_path: 'x.sock' }, '/h').config.socket_path, '/run/gw-test/x.sock');
   for (const k of ['ledger_dir', 'credentials_file', 'runs_dir', 'pid_file']) assert.equal(validateConfig({ ...good(), [k]: '/elsewhere/x' }, '/h').valid, false, `${k} must stay inside AGENT_HOME`);
   assert.equal(validateConfig({ ...good(), ledger_dir: '..' }, '/h').valid, false);
+});
+
+test('default socket_dir has no symlinked component on its platform', () => {
+  assert.equal(defaultSocketDir('linux'), '/run/agent-gateway');
+  assert.equal(defaultSocketDir('darwin'), '/var/run/agent-gateway');
+  assert.equal(defaultConfig({ gatewayUid: 1, runnerUid: 2 }).socket_dir, defaultSocketDir());
 });

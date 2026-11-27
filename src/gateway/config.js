@@ -111,8 +111,14 @@ export function loadConfig(home = agentHome(), readFile = (p) => readFileSync(p,
   return validateConfig(raw, home);
 }
 
+// Linux: /var/run is a symlink to /run and doctor rejects it, so use /run.
+// macOS: /var/run sits under the allowed /var -> private/var link.
+export function defaultSocketDir(platform = process.platform) {
+  return platform === 'darwin' ? '/var/run/agent-gateway' : '/run/agent-gateway';
+}
+
 /** The default config.json content for a fresh home (paths relative to home). */
-export function defaultConfig({ gatewayUid, runnerUid, socketDir = '/var/run/agent-gateway', runnerGroup = 'agent-runner' }) {
+export function defaultConfig({ gatewayUid, runnerUid, socketDir = defaultSocketDir(), runnerGroup = 'agent-runner' }) {
   return {
     config_version: CONFIG_VERSION,
     socket_dir: socketDir, runner_group: runnerGroup,
