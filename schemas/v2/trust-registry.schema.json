@@ -1,0 +1,38 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "trust-registry-v2",
+  "title": "Trust registry v2",
+  "description": "ADR-0007 D3. Human-owned. One entry per (server_id, pinned_commit, definition_hash); no entry means denied. Entries may be empty.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "entries"],
+  "properties": {
+    "schema_version": { "const": "2" },
+    "entries": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["server_id", "pinned_commit", "definition_hash", "trust_level", "approved_scopes", "credential_refs", "approved_by", "approved_on"],
+        "properties": {
+          "server_id": { "type": "string", "pattern": "^[a-z][a-z0-9-]{1,31}$" },
+          "pinned_commit": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+          "definition_hash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+          "trust_level": { "enum": [0, 1, 2] },
+          "approved_scopes": {
+            "type": "array",
+            "uniqueItems": true,
+            "items": { "type": "string", "pattern": "^[a-z][a-z0-9_-]*:[a-z][a-z0-9_-]*:[a-z][a-z0-9_-]*$" }
+          },
+          "credential_refs": {
+            "type": "array",
+            "uniqueItems": true,
+            "items": { "type": "string", "pattern": "^[a-z][a-z0-9._-]{1,63}$" }
+          },
+          "approved_by": { "type": "string", "minLength": 1, "pattern": "\\S" },
+          "approved_on": { "type": "string", "format": "date" }
+        }
+      }
+    }
+  }
+}
