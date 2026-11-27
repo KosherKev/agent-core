@@ -32,3 +32,4 @@
 /test/gateway-shutdown.test.js @KosherKev
 /test/gateway-store.test.js @KosherKev
 /test/gateway-tools.test.js @KosherKev
+/schemas/ @KosherKev
