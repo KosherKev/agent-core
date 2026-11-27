@@ -5,7 +5,7 @@ import { mkdtempSync, writeFileSync, rmSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
-  canonicalJson, definitionHash, tierForEffect, minTrustLevel, loadScopeVocabulary, validateManifestV2, validateGrantV2,
+  canonicalJson, definitionHash, builtinKey, tierForEffect, minTrustLevel, loadScopeVocabulary, validateManifestV2, validateGrantV2,
   validateRegistryV2, detectDrift, checkCapabilityAllowed, DEFAULT_VOCABULARY_PATH,
 } from '../src/capability-v2.js';
 import { loadFixtures } from './helpers.js';
@@ -301,8 +301,8 @@ test('checkCapabilityAllowed: builtin manifest without a hash is matched on the 
   const manifest = fx('capability-manifest-v2', 'builtin-read');
   const grant = fx('grant-v2', 'empty-capabilities');
   grant.capabilities = [{ name: manifest.name, definition_hash: definitionHash(manifest), max_calls: 3 }];
-  const args = { grant, manifest, registry: { schema_version: '2', entries: [] }, now: NOW, vocabulary: VOCAB };
-  assert.equal(checkCapabilityAllowed(args).allowed, true, 'a builtin manifest needs no registry entry');
+  const args = { grant, manifest, registry: { schema_version: '2', entries: [] }, now: NOW, vocabulary: VOCAB, builtins: [builtinKey(manifest)] };
+  assert.equal(checkCapabilityAllowed(args).allowed, true, 'a listed builtin manifest needs no registry entry');
   const withHash = { ...manifest, definition_hash: definitionHash(manifest) }; // the field is ignored when computing the expected value
   assert.equal(checkCapabilityAllowed({ ...args, manifest: withHash }).allowed, true);
   const changed = { ...manifest, version: '1.0.1' };
@@ -400,7 +400,69 @@ test('checkCapabilityAllowed: a scope outside the vocabulary is denied for built
   const manifest = fx('capability-manifest-v2', 'builtin-read');
   const grant = fx('grant-v2', 'empty-capabilities');
   grant.capabilities = [{ name: manifest.name, definition_hash: definitionHash(manifest), max_calls: 3 }];
-  const args = { grant, manifest, registry: { schema_version: '2', entries: [] }, now: NOW };
+  const args = { grant, manifest, registry: { schema_version: '2', entries: [] }, now: NOW, builtins: [builtinKey(manifest)] };
   assert.equal(checkCapabilityAllowed({ ...args, vocabulary: VOCAB }).allowed, true);
   denied({ ...args, vocabulary: ['repo:write:task-worktree'] }, 'manifest_invalid');
+});
+
+// ---- fix round 1, item 2: builtin status comes from a host-held list, not from the manifest ----
+function builtinWorld() {
+  const manifest = fx('capability-manifest-v2', 'builtin-read');
+  const grant = fx('grant-v2', 'empty-capabilities');
+  grant.capabilities = [{ name: manifest.name, definition_hash: definitionHash(manifest), max_calls: 3 }];
+  return { grant, manifest, registry: { schema_version: '2', entries: [] }, now: NOW, vocabulary: VOCAB, builtins: [builtinKey(manifest)] };
+}
+
+test('builtinKey: <name>@<hash>, using definition_hash when present and otherwise the hash of the manifest minus it', () => {
+  const m = fx('capability-manifest-v2', 'builtin-read');
+  assert.equal(builtinKey(m), `${m.name}@${definitionHash(m)}`);
+  assert.equal(builtinKey({ ...m, definition_hash: 'a'.repeat(64) }), `${m.name}@${'a'.repeat(64)}`);
+  const mcp = fx('capability-manifest-v2', 'mcp-read');
+  assert.equal(builtinKey(mcp), `${mcp.name}@${mcp.definition_hash}`);
+  assert.throws(() => builtinKey({ name: 'x', bad: NaN }), TypeError);
+});
+
+test('checkCapabilityAllowed: a builtin manifest is allowed only when its key is in builtins (array or Set)', () => {
+  const w = builtinWorld();
+  assert.equal(checkCapabilityAllowed(w).allowed, true);
+  assert.equal(checkCapabilityAllowed({ ...w, builtins: new Set(w.builtins) }).allowed, true);
+  assert.equal(checkCapabilityAllowed({ ...w, builtins: ['other@' + 'b'.repeat(64), ...w.builtins] }).allowed, true);
+});
+
+test('checkCapabilityAllowed: builtin denied when builtins is absent, empty, not a collection, or lists a different hash or name', () => {
+  const w = builtinWorld();
+  const name = w.manifest.name;
+  const hash = definitionHash(w.manifest);
+  for (const bad of [undefined, null, [], new Set(), 'string', 5, {}, { has: () => true, includes: () => true }]) denied({ ...w, builtins: bad }, 'builtin_not_registered');
+  denied({ ...w, builtins: [`${name}@${'0'.repeat(64)}`] }, 'builtin_not_registered'); // right name, different hash
+  denied({ ...w, builtins: [`other-name@${hash}`] }, 'builtin_not_registered'); // different name, right hash
+  denied({ ...w, builtins: [name, hash, `${name}@${hash.toUpperCase()}`] }, 'builtin_not_registered');
+  const { builtins: _b, ...noKey } = w;
+  denied(noKey, 'builtin_not_registered');
+});
+
+test('checkCapabilityAllowed: a self-declared builtin manifest cannot skip the registry, even with an mcp-shaped name', () => {
+  const w = builtinWorld();
+  const m = { ...w.manifest, name: 'issue-tracker.create_issue' }; // looks like an mcp capability, claims builtin
+  const grant = { ...w.grant, capabilities: [{ name: m.name, definition_hash: definitionHash(m), max_calls: 1 }] };
+  denied({ ...w, manifest: m, grant, builtins: [] }, 'builtin_not_registered');
+  denied({ ...w, manifest: m, grant, builtins: [builtinKey(w.manifest)] }, 'builtin_not_registered');
+  assert.equal(checkCapabilityAllowed({ ...w, manifest: m, grant, builtins: [builtinKey(m)] }).allowed, true, 'only the host list makes it builtin');
+});
+
+test('checkCapabilityAllowed: a listed builtin still goes through the earlier checks (grant, expiry, tier)', () => {
+  const a = builtinWorld(); a.grant.allowed_risk_tiers = ['medium'];
+  denied(a, 'tier_not_allowed');
+  const b = builtinWorld(); b.now = new Date('2031-01-01T00:00:00Z');
+  denied(b, 'grant_expired');
+  const c = builtinWorld(); c.grant.capabilities = [];
+  denied(c, 'capability_not_granted');
+});
+
+test('checkCapabilityAllowed: an mcp manifest is unaffected by builtins', () => {
+  const w = world();
+  assert.equal(checkCapabilityAllowed({ ...w, builtins: [] }).allowed, true);
+  assert.equal(checkCapabilityAllowed({ ...w, builtins: [builtinKey(w.manifest)] }).allowed, true);
+  const noReg = { ...w, registry: undefined, builtins: [builtinKey(w.manifest)] };
+  denied(noReg, 'registry_absent'); // listing an mcp key in builtins does not bypass the registry
 });

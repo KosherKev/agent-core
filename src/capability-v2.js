@@ -9,6 +9,11 @@
  * `definition_hash`. A builtin manifest may have no `definition_hash`; for it the grant entry's hash must equal
  * definitionHash() of the manifest object itself with any `definition_hash` field removed.
  *
+ * Builtin status: `origin.kind: "builtin"` is a CLAIM made by the manifest's author. The authority is a list the host
+ * holds in code and passes to checkCapabilityAllowed as `builtins`: strings of the form `<name>@<definition_hash>`
+ * (see builtinKey). A builtin manifest that is not on that list is denied, so a manifest cannot skip the trust
+ * registry by calling itself builtin.
+ *
  * Nothing here is enforced by the gateway yet. `effect`, annotations and descriptions are the tool author's claims.
  */
 import { createHash } from 'node:crypto';
@@ -192,6 +197,22 @@ export function detectDrift(pinnedHash, liveToolDefinition) {
   }
 }
 
+// The hash that identifies a manifest: its own definition_hash when present, else the hash of the manifest minus any definition_hash.
+function manifestHash(manifest) {
+  if (manifest.definition_hash !== undefined) return manifest.definition_hash;
+  const { definition_hash: _omit, ...rest } = manifest;
+  return definitionHash(rest);
+}
+
+/**
+ * The list key for a builtin manifest: `<name>@<definition_hash>`, using manifest.definition_hash when present and
+ * otherwise definitionHash() of the manifest without any definition_hash field. Throws on a manifest that cannot be
+ * hashed (same rules as canonicalJson); checkCapabilityAllowed catches that and denies.
+ */
+export function builtinKey(manifest) {
+  return `${manifest.name}@${manifestHash(manifest)}`;
+}
+
 const deny = (reason) => ({ allowed: false, reason });
 
 /**
@@ -199,7 +220,10 @@ const deny = (reason) => ({ allowed: false, reason });
  * 0 `vocabulary` (an array or Set of scope strings, REQUIRED) is present, else `vocabulary_missing`;
  * 1 grant and manifest valid (the manifest's scopes must all be in `vocabulary`, whatever the registry says);
  * 2 `now` (a Date, required) before grant.expires_at; 3 the grant lists the manifest's name
- * with the matching definition hash; 4 risk_tier in grant.allowed_risk_tiers; then, for mcp origin only:
+ * with the matching definition hash; 4 risk_tier in grant.allowed_risk_tiers; then
+ * for builtin origin: `builtins` (an array or Set) must contain builtinKey(manifest), else `builtin_not_registered`
+ * (origin is a claim; the list is the authority; no registry entry is needed once listed); for mcp origin only, and
+ * `builtins` is not used:
  * 5 a registry entry for exactly (server_id, pinned_commit, definition_hash);
  * 6 entry.trust_level >= minTrustLevel(manifest); 7 every manifest scope in entry.approved_scopes;
  * 8 every manifest credential in entry.credential_refs.
@@ -208,7 +232,7 @@ const deny = (reason) => ({ allowed: false, reason });
 export function checkCapabilityAllowed(args) {
   try {
     if (args === null || typeof args !== 'object') return deny('input_invalid: expected an object { grant, manifest, registry, now, vocabulary }');
-    const { grant, manifest, registry, now, vocabulary } = args;
+    const { grant, manifest, registry, now, vocabulary, builtins } = args;
     if (!(Array.isArray(vocabulary) || vocabulary instanceof Set)) return deny('vocabulary_missing: vocabulary must be an array or a Set of scope strings');
     const g = validateGrantV2(grant);
     if (!g.valid) return deny(`grant_invalid: ${g.errors.join('; ')}`);
@@ -222,16 +246,16 @@ export function checkCapabilityAllowed(args) {
 
     const listed = grant.capabilities.find((c) => c.name === manifest.name);
     if (!listed) return deny(`capability_not_granted: the grant does not list "${manifest.name}"`);
-    let expected = manifest.definition_hash;
-    if (expected === undefined) {
-      const { definition_hash: _omit, ...rest } = manifest; // builtin manifest with no hash
-      expected = definitionHash(rest);
-    }
-    if (listed.definition_hash !== expected) return deny('hash_mismatch: the grant pins a different definition hash than the manifest');
+    if (listed.definition_hash !== manifestHash(manifest)) return deny('hash_mismatch: the grant pins a different definition hash than the manifest');
 
     if (!grant.allowed_risk_tiers.includes(manifest.risk_tier)) return deny(`tier_not_allowed: risk tier "${manifest.risk_tier}" is not in the grant`);
 
-    if (manifest.origin.kind === 'builtin') return { allowed: true, reason: 'ok: builtin capability, grant checks passed' };
+    if (manifest.origin.kind === 'builtin') {
+      const list = Array.isArray(builtins) ? builtins : builtins instanceof Set ? builtins : null;
+      const ok = list !== null && (Array.isArray(list) ? list.includes(builtinKey(manifest)) : list.has(builtinKey(manifest)));
+      if (!ok) return deny(`builtin_not_registered: "${manifest.name}" is not on the host's builtin list (origin is only a claim)`);
+      return { allowed: true, reason: 'ok: builtin capability on the host list, grant checks passed' };
+    }
 
     const r = validateRegistryV2(registry);
     if (!r.valid) return deny(`registry_absent: no valid trust registry (${r.errors.join('; ')})`);
