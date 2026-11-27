@@ -70,3 +70,6 @@ Fixtures for valid and invalid v2 manifests and grants; effect/tier mismatch rej
 
 ## Addendum 2026-11-27
 (a) `tool_definition` is stored in the MCP manifest so the definition hash can be re-checked. (b) Because `acceptance/` is locked, v2 fixtures are iterated by `test/capability-v2-schemas.test.js`, not by the acceptance suite.
+
+## Addendum 2026-11-27 (fix round 1)
+(a) `checkCapabilityAllowed` requires the scope vocabulary and denies without it (`vocabulary_missing`); a manifest scope outside the vocabulary is denied whatever the registry approves. (b) Builtin status comes from a host-held list of `<name>@<definition_hash>` keys passed to `checkCapabilityAllowed`, not from the manifest's `origin` claim; a builtin manifest not on the list is denied (`builtin_not_registered`). (c) MCP tool names may be mixed case, `[A-Za-z0-9_.-]`, up to 128 characters, and are case-sensitive; the manifest name is `<server_id>.<tool name>` and `server_id` stays lowercase. A tool whose real name falls outside that cannot be registered.
