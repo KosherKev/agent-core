@@ -8,6 +8,7 @@ import {
   canonicalJson, definitionHash, builtinKey, tierForEffect, minTrustLevel, loadScopeVocabulary, validateManifestV2, validateGrantV2,
   validateRegistryV2, detectDrift, checkCapabilityAllowed, DEFAULT_VOCABULARY_PATH,
 } from '../src/capability-v2.js';
+import { validateManifestV2Schema } from '../src/validators.js';
 import { loadFixtures } from './helpers.js';
 
 const clone = (o) => JSON.parse(JSON.stringify(o));
@@ -465,4 +466,73 @@ test('checkCapabilityAllowed: an mcp manifest is unaffected by builtins', () => 
   assert.equal(checkCapabilityAllowed({ ...w, builtins: [builtinKey(w.manifest)] }).allowed, true);
   const noReg = { ...w, registry: undefined, builtins: [builtinKey(w.manifest)] };
   denied(noReg, 'registry_absent'); // listing an mcp key in builtins does not bypass the registry
+});
+
+// ---- fix round 1, item 3: mixed-case MCP tool names ----
+const MIXED = ['mcp-read-mixed-case-getuser', 'mcp-read-upper-snake-tool'];
+
+function mixedWorld(file) {
+  const manifest = fx('capability-manifest-v2', file);
+  const grant = fx('grant-v2', 'mixed-case-mcp-capabilities');
+  const registry = { schema_version: '2', entries: [{ server_id: manifest.origin.server_id, pinned_commit: manifest.origin.pinned_commit, definition_hash: manifest.definition_hash, trust_level: 0, approved_scopes: [...manifest.scopes], credential_refs: [], approved_by: 'kevin', approved_on: '2026-11-27' }] };
+  return { grant, manifest, registry, now: NOW, vocabulary: VOCAB };
+}
+
+test('mixed-case mcp tools validate end to end: schema, hash, name equality, and an allow decision with a matching registry entry', () => {
+  for (const file of MIXED) {
+    const w = mixedWorld(file);
+    const tool = w.manifest.tool_definition.name;
+    assert.ok(/[A-Z]/.test(tool), `${file}: the tool name has uppercase`);
+    assert.equal(w.manifest.name, `${w.manifest.origin.server_id}.${tool}`);
+    assert.equal(w.manifest.definition_hash, definitionHash(w.manifest.tool_definition));
+    const v = validateManifestV2(w.manifest, { vocabulary: VOCAB });
+    assert.equal(v.valid, true, v.errors.join('; '));
+    assert.equal(validateGrantV2(w.grant).valid, true);
+    const r = checkCapabilityAllowed(w);
+    assert.equal(r.allowed, true, `${file}: ${r.reason}`);
+  }
+  assert.equal(mixedWorld(MIXED[0]).manifest.name, 'acme.getUser');
+  assert.equal(mixedWorld(MIXED[1]).manifest.name, 'datahub.DATA_EXPORT_v2');
+});
+
+test('mixed-case mcp tools: registry, grant and tier checks still apply', () => {
+  const noEntry = mixedWorld(MIXED[0]); noEntry.registry.entries = [];
+  denied(noEntry, 'registry_absent');
+  const notListed = mixedWorld(MIXED[0]); notListed.grant.capabilities = notListed.grant.capabilities.filter((c) => c.name !== 'acme.getUser');
+  denied(notListed, 'capability_not_granted');
+  const lowerListed = mixedWorld(MIXED[0]); lowerListed.grant.capabilities[0].name = 'acme.getuser'; // names are case-sensitive
+  denied(lowerListed, 'capability_not_granted');
+});
+
+test('validateManifestV2: an mcp name whose tool part differs in case from tool_definition.name is rejected (the schema alone cannot)', () => {
+  const m = fx('capability-manifest-v2', MIXED[0]);
+  m.name = 'acme.getuser';
+  assert.equal(validateManifestV2Schema(m).valid, true, 'the schema accepts it');
+  const r = validateManifestV2(m, { vocabulary: VOCAB });
+  assert.equal(r.valid, false);
+  assert.ok(r.errors.some((e) => /\/name must equal/.test(e)), r.errors.join('; '));
+  const server = fx('capability-manifest-v2', MIXED[0]);
+  server.name = 'acme.getUser'; server.tool_definition.name = 'GetUser';
+  assert.equal(validateManifestV2(server, { vocabulary: VOCAB }).valid, false);
+});
+
+test('mcp tool names: 128 characters of [A-Za-z0-9_.-] register, 129 or an outside character does not (fail closed)', () => {
+  const make = (tool) => {
+    const m = fx('capability-manifest-v2', MIXED[0]);
+    m.tool_definition.name = tool; m.name = `acme.${tool}`; m.definition_hash = definitionHash(m.tool_definition);
+    return m;
+  };
+  assert.equal(validateManifestV2(make('A'.repeat(128)), { vocabulary: VOCAB }).valid, true);
+  assert.equal(validateManifestV2(make('A'.repeat(129)), { vocabulary: VOCAB }).valid, false);
+  for (const bad of ['get User', 'get/User', 'get:User', 'café', 'get\nUser', '']) assert.equal(validateManifestV2(make(bad), { vocabulary: VOCAB }).valid, false, JSON.stringify(bad));
+  for (const ok of ['getUser', 'DATA_EXPORT_v2', 'a.b-c_D', '9lives']) assert.equal(validateManifestV2(make(ok), { vocabulary: VOCAB }).valid, true, ok);
+});
+
+test('a builtin manifest keeps the lowercase name rule; server_id stays lowercase', () => {
+  const b = fx('capability-manifest-v2', 'builtin-read');
+  b.name = 'Repo-read-file';
+  assert.equal(validateManifestV2(b, { vocabulary: VOCAB }).valid, false);
+  const m = fx('capability-manifest-v2', MIXED[0]);
+  m.origin.server_id = 'Acme'; m.name = 'Acme.getUser';
+  assert.equal(validateManifestV2(m, { vocabulary: VOCAB }).valid, false);
 });

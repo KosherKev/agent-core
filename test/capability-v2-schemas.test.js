@@ -32,6 +32,9 @@ const REASONS = {
     'v1-schema-version': /schema_version/,
     'duplicate-scopes': /\/scopes must NOT have duplicate items/,
     'tool-definition-extra-key': /additional properties/,
+    'mcp-server-prefix-uppercase': /\/name .*pattern/,
+    'builtin-uppercase-name': /\/name .*pattern/,
+    'mcp-name-with-space': /\/name .*pattern/,
   },
   'grant-v2': {
     'missing-capabilities': /capabilities/,
@@ -40,6 +43,8 @@ const REASONS = {
     'v1-schema-version': /schema_version/,
     'wildcard-name': /\/capabilities\/0\/name .*pattern/,
     'extra-field-on-capability': /additional properties/,
+    'server-prefix-uppercase': /\/capabilities\/0\/name .*pattern/,
+    'capability-name-with-space': /\/capabilities\/0\/name .*pattern/,
   },
   'trust-registry-v2': {
     'trust-level-3': /trust_level .*allowed values/,
