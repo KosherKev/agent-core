@@ -1,0 +1,35 @@
+{
+  "schema_version": "2",
+  "name": "repo-read-file",
+  "version": "1.0.0",
+  "origin": {
+    "kind": "builtin"
+  },
+  "scopes": [
+    "repo:read:task-worktree"
+  ],
+  "inputs": [
+    {
+      "name": "path",
+      "type": "string",
+      "required": true
+    }
+  ],
+  "outputs": [
+    {
+      "name": "content",
+      "type": "string"
+    }
+  ],
+  "effect": "money",
+  "mode": "execute",
+  "risk_tier": "payments",
+  "network": {
+    "egress": "none"
+  },
+  "credentials": [],
+  "execution_identity": "agent_builder",
+  "undo": {
+    "button_ref": "b"
+  }
+}

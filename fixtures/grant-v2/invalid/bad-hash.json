@@ -1,0 +1,28 @@
+{
+  "schema_version": "2",
+  "task_id": "task-0001",
+  "scope": {
+    "repos": [
+      "agent-core"
+    ],
+    "paths": [
+      "docs/"
+    ]
+  },
+  "budget": {
+    "max_usd": 0.5,
+    "max_tool_calls": 20
+  },
+  "expires_at": "2030-01-01T00:00:00Z",
+  "allowed_risk_tiers": [
+    "low",
+    "medium"
+  ],
+  "capabilities": [
+    {
+      "name": "docs-search.search",
+      "definition_hash": "abc",
+      "max_calls": 1
+    }
+  ]
+}

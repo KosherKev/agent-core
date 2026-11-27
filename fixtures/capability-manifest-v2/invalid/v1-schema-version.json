@@ -1,0 +1,35 @@
+{
+  "schema_version": "1",
+  "name": "repo-read-file",
+  "version": "1.0.0",
+  "origin": {
+    "kind": "builtin"
+  },
+  "scopes": [
+    "repo:read:task-worktree"
+  ],
+  "inputs": [
+    {
+      "name": "path",
+      "type": "string",
+      "required": true
+    }
+  ],
+  "outputs": [
+    {
+      "name": "content",
+      "type": "string"
+    }
+  ],
+  "effect": "read",
+  "mode": "execute",
+  "risk_tier": "low",
+  "network": {
+    "egress": "none"
+  },
+  "credentials": [],
+  "execution_identity": "agent_builder",
+  "undo": {
+    "not_applicable_read_only": true
+  }
+}
