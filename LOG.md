@@ -890,3 +890,34 @@ Gateway `call_capability` (ledger entries, durable budget reservation), MCP clie
 - `npm run check:self-model` on both: "self-model.json is up to date".
 - Guard `node .github/scripts/locked-paths.mjs <origin/main sha> <HEAD sha>`: "no locked paths touched".
 - Banned-token grep (`fetch(`, `node:net`, `node:http(s)`, `XMLHttpRequest`, `WebSocket`) over the new src, test and schema files: no hits.
+
+# Fix round 1 (capability contract v2), 2026-11-27
+Added to the same branch `task/capability-contract-v2`, starting from origin tip 41a26ce (confirmed before starting). One commit per item.
+
+## What was done per item
+1. Vocabulary required. `checkCapabilityAllowed` now checks `vocabulary` (array or Set) first, right after the input-object check, and denies with `vocabulary_missing` otherwise. The manifest check always goes through `validateManifestV2(manifest, { vocabulary })`; the path that skipped it is gone. `validateManifestV2` keeps its default-file fallback. Header comment updated. Tests: a missing or non-collection vocabulary denies (first, even with junk elsewhere); a scope outside the vocabulary is denied for mcp origin even when the registry entry approves it, and for builtin origin.
+2. Builtin list. `checkCapabilityAllowed` takes `builtins` (array or Set of `<name>@<definition_hash>`); new export `builtinKey(manifest)`. A builtin-origin manifest is allowed only if its key is in `builtins`, else `builtin_not_registered`; mcp manifests ignore `builtins`. Header comment says origin is a claim and the list is the authority. Tests: allowed only when listed; denied with `builtins` absent, empty, not a collection, right name with another hash, another name with the right hash, case-changed hash; a self-declared builtin with an mcp-shaped name is denied unless listed; listing an mcp key in `builtins` does not bypass the registry; the earlier checks still apply to listed builtins.
+3. Mixed-case MCP tool names. Manifest `name` is now checked by origin: builtin keeps `^[a-z][a-z0-9_.-]{1,63}$`; mcp must match `^[a-z][a-z0-9-]{1,31}\.[A-Za-z0-9_.-]{1,128}$`. Grant capability `name` takes either form. `server_id` stays lowercase; the code check that `name` equals `<server_id>.<tool_definition.name>` stays and is case-sensitive. New valid fixtures: mcp manifests for `acme.getUser` and `datahub.DATA_EXPORT_v2` (hashes from `definitionHash`) and a grant listing both. New invalid fixtures: mcp server prefix uppercase, builtin uppercase name, mcp name with a space, plus two grant fixtures (uppercase server prefix, space). The "tool part differs in case" case is a test, not a fixture, because the schema accepts it and only the code check rejects it. Tests also cover 128 characters (ok) versus 129 and outside characters (rejected), and the end-to-end allow case for both mixed-case tools with a matching registry entry.
+4. ADR-0007 addendum "Addendum 2026-11-27 (fix round 1)" appended; no earlier ADR text changed.
+5. Pushed to the same branch (see the task summary for the sha).
+
+## Counts and checks
+- `npm test` on Node 22.23.5: 786 tests, 786 pass, 0 fail, 0 skipped (includes `test/grant-adapter.test.js` and the acceptance suite).
+- `npm test` on Node 24.22.3: 786 tests, 786 pass, 0 fail, 0 skipped.
+- `npm run check:self-model` passes on both; `self-model.json` was not stale and is unchanged.
+- Guard `node .github/scripts/locked-paths.mjs 41a26ce <HEAD>`: "no locked paths touched". `git diff --name-only 41a26ce...HEAD` lists only the allowed paths.
+- Banned-token grep over the new and changed src, test and schema files: no hits.
+
+## Fixtures changed
+None of the round 1 fixtures was changed; all pass unchanged. Only new fixtures were added.
+
+## Registration limit
+A tool whose real name contains a character outside `[A-Za-z0-9_.-]`, or is longer than 128 characters, cannot be registered. Its manifest name would fail the schema, so it is refused (fail closed). A tool name that fits the pattern but is longer than 128 characters is refused the same way.
+
+## What the tests cannot prove
+That the host will actually pass the right `vocabulary` and `builtins` (the gateway does not call this code yet); the builtin list is only as trustworthy as the code that holds it. That real MCP servers' tool names, which are the server's own claims, fit the pattern. The grant name pattern is checked in the schema only; whether a granted name matches a live server's tool is not tested (no MCP code).
+
+## Interface gaps
+- `checkCapabilityAllowed` now has two required inputs besides grant, manifest, registry and now: `vocabulary` always, and `builtins` for builtin manifests. Callers that used it without them are denied.
+- `builtinKey` throws on a manifest that cannot be hashed (like `definitionHash`); `checkCapabilityAllowed` catches it and denies.
+- The builtin key uses the manifest's own `definition_hash` when present, so a builtin that sets it is identified by what it claims; a host that wants to bind to content should leave it unset and list the computed hash.
