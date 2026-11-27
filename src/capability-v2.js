@@ -196,21 +196,23 @@ const deny = (reason) => ({ allowed: false, reason });
 
 /**
  * May this task call this capability? Checks in order and stops at the first failure:
- * 1 grant and manifest valid; 2 `now` (a Date, required) before grant.expires_at; 3 the grant lists the manifest's name
- * with the matching definition hash; 4 risk_tier in grant.allowed_risk_tiers; then, for mcp origin only (builtin
- * needs no registry entry): 5 a registry entry for exactly (server_id, pinned_commit, definition_hash);
+ * 0 `vocabulary` (an array or Set of scope strings, REQUIRED) is present, else `vocabulary_missing`;
+ * 1 grant and manifest valid (the manifest's scopes must all be in `vocabulary`, whatever the registry says);
+ * 2 `now` (a Date, required) before grant.expires_at; 3 the grant lists the manifest's name
+ * with the matching definition hash; 4 risk_tier in grant.allowed_risk_tiers; then, for mcp origin only:
+ * 5 a registry entry for exactly (server_id, pinned_commit, definition_hash);
  * 6 entry.trust_level >= minTrustLevel(manifest); 7 every manifest scope in entry.approved_scopes;
  * 8 every manifest credential in entry.credential_refs.
- * `vocabulary` is optional: when given, manifest scopes must be in it (step 1); when omitted the schema-level scope
- * pattern is the only scope check for a builtin manifest. Never throws.
+ * There is no way to skip the vocabulary check. Never throws.
  */
 export function checkCapabilityAllowed(args) {
   try {
-    if (args === null || typeof args !== 'object') return deny('input_invalid: expected an object { grant, manifest, registry, now }');
+    if (args === null || typeof args !== 'object') return deny('input_invalid: expected an object { grant, manifest, registry, now, vocabulary }');
     const { grant, manifest, registry, now, vocabulary } = args;
+    if (!(Array.isArray(vocabulary) || vocabulary instanceof Set)) return deny('vocabulary_missing: vocabulary must be an array or a Set of scope strings');
     const g = validateGrantV2(grant);
     if (!g.valid) return deny(`grant_invalid: ${g.errors.join('; ')}`);
-    const m = vocabulary === undefined ? checkManifestCore(manifest) : validateManifestV2(manifest, { vocabulary });
+    const m = validateManifestV2(manifest, { vocabulary });
     if (!m.valid) return deny(`manifest_invalid: ${m.errors.join('; ')}`);
 
     if (!(now instanceof Date) || Number.isNaN(now.getTime())) return deny('now_invalid: now must be a valid Date');

@@ -249,7 +249,6 @@ const denied = (args, code) => {
 test('checkCapabilityAllowed: allows an mcp write capability when grant, manifest and registry all agree', () => {
   const r = checkCapabilityAllowed(world());
   assert.equal(r.allowed, true, r.reason);
-  assert.equal(checkCapabilityAllowed({ ...world(), vocabulary: undefined }).allowed, true, 'vocabulary is optional here');
 });
 
 test('checkCapabilityAllowed: allows an mcp read capability at level 0 with no credentials', () => {
@@ -374,4 +373,34 @@ test('checkCapabilityAllowed: inputs are not mutated', () => {
   const before = canonicalJson({ grant: w.grant, manifest: w.manifest, registry: w.registry });
   checkCapabilityAllowed(w);
   assert.equal(canonicalJson({ grant: w.grant, manifest: w.manifest, registry: w.registry }), before);
+});
+
+// ---- fix round 1, item 1: the vocabulary is required and cannot be skipped ----
+test('checkCapabilityAllowed: a missing or non-collection vocabulary denies first, before any other check', () => {
+  for (const bad of [undefined, null, 'repo:read:task-worktree', 5, {}, { has: () => true }, true]) {
+    denied({ ...world(), vocabulary: bad }, 'vocabulary_missing');
+  }
+  const w = world(); delete w.vocabulary;
+  denied(w, 'vocabulary_missing');
+  // first even when the grant is invalid, the clock is bad and the registry is absent
+  denied({ grant: undefined, manifest: undefined, registry: undefined, now: undefined }, 'vocabulary_missing');
+  assert.equal(checkCapabilityAllowed({ ...world(), vocabulary: new Set(VOCAB) }).allowed, true, 'a Set works');
+  assert.equal(checkCapabilityAllowed({ ...world(), vocabulary: [] }).allowed, false, 'an empty vocabulary admits nothing');
+});
+
+test('checkCapabilityAllowed: a scope outside the vocabulary is denied for mcp origin even when the registry entry approves it', () => {
+  const w = world();
+  assert.ok(w.registry.entries[0].approved_scopes.includes('repo:write:task-worktree'), 'the registry approves the scope');
+  w.vocabulary = ['repo:read:task-worktree'];
+  denied(w, 'manifest_invalid');
+  assert.match(checkCapabilityAllowed(w).reason, /repo:write:task-worktree/);
+});
+
+test('checkCapabilityAllowed: a scope outside the vocabulary is denied for builtin origin too', () => {
+  const manifest = fx('capability-manifest-v2', 'builtin-read');
+  const grant = fx('grant-v2', 'empty-capabilities');
+  grant.capabilities = [{ name: manifest.name, definition_hash: definitionHash(manifest), max_calls: 3 }];
+  const args = { grant, manifest, registry: { schema_version: '2', entries: [] }, now: NOW };
+  assert.equal(checkCapabilityAllowed({ ...args, vocabulary: VOCAB }).allowed, true);
+  denied({ ...args, vocabulary: ['repo:write:task-worktree'] }, 'manifest_invalid');
 });
