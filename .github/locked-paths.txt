@@ -32,3 +32,4 @@ test/gateway-server.test.js
 test/gateway-shutdown.test.js
 test/gateway-store.test.js
 test/gateway-tools.test.js
+schemas/
