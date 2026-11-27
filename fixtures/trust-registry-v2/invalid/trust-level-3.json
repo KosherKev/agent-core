@@ -1,0 +1,17 @@
+{
+  "schema_version": "2",
+  "entries": [
+    {
+      "server_id": "docs-search",
+      "pinned_commit": "0123456789abcdef0123456789abcdef01234567",
+      "definition_hash": "1de8d19a8015b084f0aa38ff2815d7b3d5fc50ad2c1ea3f1f721780275c82c52",
+      "trust_level": 3,
+      "approved_scopes": [
+        "repo:read:task-worktree"
+      ],
+      "credential_refs": [],
+      "approved_by": "kevin",
+      "approved_on": "2026-11-27"
+    }
+  ]
+}

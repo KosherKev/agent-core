@@ -1,0 +1,62 @@
+{
+  "schema_version": "2",
+  "name": "docs-search.search",
+  "version": "1.2.0",
+  "origin": {
+    "kind": "mcp",
+    "server_id": "docs.search",
+    "source_url": "https://example.com/mcp/docs-search",
+    "pinned_commit": "0123456789abcdef0123456789abcdef01234567",
+    "lockfile_sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+    "protocol_version": "2026-07-28"
+  },
+  "definition_hash": "1de8d19a8015b084f0aa38ff2815d7b3d5fc50ad2c1ea3f1f721780275c82c52",
+  "tool_definition": {
+    "name": "search",
+    "description": "Search the docs index and return matching titles.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "query": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "query"
+      ]
+    },
+    "annotations": {
+      "readOnlyHint": true
+    }
+  },
+  "scopes": [
+    "repo:read:task-worktree"
+  ],
+  "inputs": [
+    {
+      "name": "query",
+      "type": "string",
+      "required": true
+    }
+  ],
+  "outputs": [
+    {
+      "name": "result",
+      "type": "object"
+    }
+  ],
+  "effect": "read",
+  "mode": "execute",
+  "risk_tier": "low",
+  "network": {
+    "egress": "allowlist",
+    "hosts": [
+      "docs.example.com"
+    ]
+  },
+  "credentials": [],
+  "execution_identity": "mcp_docs",
+  "undo": {
+    "not_applicable_read_only": true
+  }
+}

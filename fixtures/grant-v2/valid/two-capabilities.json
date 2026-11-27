@@ -1,0 +1,33 @@
+{
+  "schema_version": "2",
+  "task_id": "task-0001",
+  "scope": {
+    "repos": [
+      "agent-core"
+    ],
+    "paths": [
+      "docs/"
+    ]
+  },
+  "budget": {
+    "max_usd": 0.5,
+    "max_tool_calls": 20
+  },
+  "expires_at": "2030-01-01T00:00:00Z",
+  "allowed_risk_tiers": [
+    "low",
+    "medium"
+  ],
+  "capabilities": [
+    {
+      "name": "docs-search.search",
+      "definition_hash": "1de8d19a8015b084f0aa38ff2815d7b3d5fc50ad2c1ea3f1f721780275c82c52",
+      "max_calls": 5
+    },
+    {
+      "name": "issue-tracker.create_issue",
+      "definition_hash": "6e43bb958660a5e458c4a2a8f9433e7c610d9cc2765bc6f6a95fce7931e7182f",
+      "max_calls": 1
+    }
+  ]
+}

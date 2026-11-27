@@ -834,3 +834,90 @@ None. Small additions beyond the literal text: in the proof steps the `ls`, `chm
 - `npm test` on Node 22.23.5: 670 tests, 670 pass, 0 fail.
 - `npm test` on Node 24.22.3: 670 tests, 670 pass, 0 fail.
 - Guard `node .github/scripts/locked-paths.mjs <origin/main sha> <branch HEAD sha>`: "no locked paths touched", exit 0.
+
+# Capability contract v2 (schemas, fixtures, pure validators, ADR move), 2026-11-27
+Branch task/capability-contract-v2 from origin/main 86546af. ADR-0007 was on origin/main. One commit per item.
+
+## What was done per item
+1. `schemas/v2/` (manifest, grant, trust-registry, scopes), registered under their `$id` (`capability-manifest-v2`, `grant-v2`, `trust-registry-v2`, `capability-scopes-v2`); `src/validators.js` loads `schemas/v2` too and exports the four `validate*V2Schema` wrappers. v1 names and behaviour unchanged. Effect/tier and draft-only rules, mcp-requires-hash-and-tool_definition and read-only undo are enforced in the schema with if/then.
+2. Fixtures in four new `fixtures/*-v2` directories (5 valid and 20 invalid manifests, 2 and 6 grants, 2 and 4 registries, 2 and 3 scope files) and `test/capability-v2-schemas.test.js`, which also asserts each invalid fixture is rejected for its named reason (a table of error-text patterns that must cover exactly the invalid fixtures). The mcp fixtures carry hashes computed with `definitionHash`.
+3. `src/capability-v2.js`: `canonicalJson`, `definitionHash`, `tierForEffect`, `minTrustLevel`, `loadScopeVocabulary`, `validateManifestV2`, `validateGrantV2`, `validateRegistryV2`, `detectDrift`, `checkCapabilityAllowed`. Denial reasons start with a code: `grant_invalid`, `manifest_invalid`, `now_invalid`, `grant_expired`, `capability_not_granted`, `hash_mismatch`, `tier_not_allowed`, `registry_absent`, `trust_level_too_low`, `scope_not_approved`, `credential_not_approved`.
+4. `test/capability-v2-functions.test.js` (36 tests): hash vectors, one denial test per check plus an order test, vocabulary file missing/malformed/invalid/valid in a temp dir, no-throw on junk input.
+5. `docs/proposals/capability-scopes.json` and `docs/proposals/trust-registry.json` with `test/capability-v2-proposals.test.js`. `config/` was not touched.
+6. ADR-0007 moved with `git mv` to `docs/adr/`, Location paragraph rewritten, addendum added, `docs/adr-pending/` removed. `test/self-model.test.js` now asserts the exact ten `name@version` strings and an ADR-to-contracts coverage map; no other assertion was changed. `self-model.json` regenerated (`npm run build`). README: the `docs/adr/` line states the coverage rule, one line added for `schemas/v2/`.
+7. Branch pushed (see the task summary for the sha).
+
+## Decisions for Kevin
+- Clarification 1: ADR-0007 D2 says the hash covers the tool definition but not where it is stored. Added a `tool_definition` field to MCP manifests (required for `mcp`, optional for `builtin`) so the hash can be re-checked. The hash covers the whole object stored, so `title` and `icons` count too, not only the five fields D2 lists.
+- Clarification 2: D8 says the acceptance suite iterates both versions. `acceptance/contracts.test.js` is locked, so v2 fixtures are iterated by `test/capability-v2-schemas.test.js`.
+- Coverage rule: the "one ADR per contract" assertion was replaced by "every contract is covered by at least one ADR" with an explicit map (ADR-0007 covers the four v2 contracts), in the same change as the ADR move.
+- `minTrustLevel` mapping, decided in this spec and not stated in the ADR: read=0, write_reversible=1, write_irreversible=2, money=2, and 1 if `credentials` is non-empty and the effect rule gives 0.
+- Self-model names: contracts are named from the file name, so the v2 contracts appear as `capability-manifest@v2`, `grant@v2`, `trust-registry@v2` and `capability-scopes@v2` (not with the `-v2` suffix, which is only the schema `$id`).
+
+## Hand items for Kevin
+Install the proposed config files (they are not in `config/`; `config/` is locked, so this is a human change):
+```sh
+cd ~/dev/agent-core && git checkout main && git pull
+git checkout -b install-capability-config
+cp docs/proposals/capability-scopes.json config/capability-scopes.json
+cp docs/proposals/trust-registry.json config/trust-registry.json
+git add config/capability-scopes.json config/trust-registry.json
+git commit -m "Install capability scope vocabulary and empty trust registry"
+git push -u origin install-capability-config
+gh pr create --fill
+```
+- Optional: extend `acceptance/contracts.test.js` to iterate the v2 fixtures (D8).
+- Lock `schemas/` afterwards (ADR-0007 decision 4), by hand.
+- Note: once `config/capability-scopes.json` exists, the test "with no vocabulary it needs the default file" takes its other branch (it only checks the result is well formed). It reads that default path with `existsSync` and `loadScopeVocabulary`; it never writes to `config/`.
+
+## What the tests cannot prove
+Nothing here is enforced by the gateway yet; these are pure checks and schemas. `effect`, annotations and descriptions are the tool author's claims, so a correct effect/tier pair says nothing about what a tool really does. Whether the contract fits real MCP servers is not tested (no MCP code, no network). The canonical JSON is checked against the spec's rules and a few fixed vectors, not against another implementation.
+
+## Later work (not done here)
+Gateway `call_capability` (ledger entries, durable budget reservation), MCP client/host and sandboxing, execution identities in practice, drift handling (disable and tell Kevin), `input_required`, resource links and embedded URIs, unknown-outcome behaviour for non-idempotent calls, vetting (ADR-0008), discovery, task-spec v2. Tests for `input_required`, resource links and unknown outcome need the gateway.
+
+## Interface gaps hit
+- `checkCapabilityAllowed` has no `vocabulary` argument in the spec. Added an optional one: when given, manifest scopes must be in it; when omitted, a builtin manifest's scopes are checked only against the schema pattern (builtin needs no registry entry), and an mcp manifest's scopes are checked against the registry entry's `approved_scopes`. Kevin may want the vocabulary to be required.
+- `grant-v2` keeps v1's `budget.max_usd` as a JSON `number` (float), against the "integer arithmetic for money" constraint; changing it would diverge from v1 ("same constraints"). The gateway's meter works in integer micro-USD.
+- The manifest `name` pattern (`^[a-z][a-z0-9_.-]{1,63}$`) is lowercase only, but MCP tool names can contain uppercase, so such a tool cannot get a manifest whose name equals `<server_id>.<tool name>`.
+- `tool_definition` is stored whole, including `description`, so a manifest file can be large and carries untrusted text.
+- A v2 manifest has a builtin hash only if the author sets one; otherwise the grant entry must hash the manifest itself. This rule is in the module header only.
+- The tests for no-vocabulary behaviour have to touch the real default path (read only), because that is the behaviour under test.
+
+## Commands run and counts
+- `npm test` on Node 22.23.5: 764 tests, 764 pass, 0 fail, 0 skipped (includes `test/grant-adapter.test.js` and the acceptance suite).
+- `npm test` on Node 24.22.3: 764 tests, 764 pass, 0 fail, 0 skipped.
+- `npm run check:self-model` on both: "self-model.json is up to date".
+- Guard `node .github/scripts/locked-paths.mjs <origin/main sha> <HEAD sha>`: "no locked paths touched".
+- Banned-token grep (`fetch(`, `node:net`, `node:http(s)`, `XMLHttpRequest`, `WebSocket`) over the new src, test and schema files: no hits.
+
+# Fix round 1 (capability contract v2), 2026-11-27
+Added to the same branch `task/capability-contract-v2`, starting from origin tip 41a26ce (confirmed before starting). One commit per item.
+
+## What was done per item
+1. Vocabulary required. `checkCapabilityAllowed` now checks `vocabulary` (array or Set) first, right after the input-object check, and denies with `vocabulary_missing` otherwise. The manifest check always goes through `validateManifestV2(manifest, { vocabulary })`; the path that skipped it is gone. `validateManifestV2` keeps its default-file fallback. Header comment updated. Tests: a missing or non-collection vocabulary denies (first, even with junk elsewhere); a scope outside the vocabulary is denied for mcp origin even when the registry entry approves it, and for builtin origin.
+2. Builtin list. `checkCapabilityAllowed` takes `builtins` (array or Set of `<name>@<definition_hash>`); new export `builtinKey(manifest)`. A builtin-origin manifest is allowed only if its key is in `builtins`, else `builtin_not_registered`; mcp manifests ignore `builtins`. Header comment says origin is a claim and the list is the authority. Tests: allowed only when listed; denied with `builtins` absent, empty, not a collection, right name with another hash, another name with the right hash, case-changed hash; a self-declared builtin with an mcp-shaped name is denied unless listed; listing an mcp key in `builtins` does not bypass the registry; the earlier checks still apply to listed builtins.
+3. Mixed-case MCP tool names. Manifest `name` is now checked by origin: builtin keeps `^[a-z][a-z0-9_.-]{1,63}$`; mcp must match `^[a-z][a-z0-9-]{1,31}\.[A-Za-z0-9_.-]{1,128}$`. Grant capability `name` takes either form. `server_id` stays lowercase; the code check that `name` equals `<server_id>.<tool_definition.name>` stays and is case-sensitive. New valid fixtures: mcp manifests for `acme.getUser` and `datahub.DATA_EXPORT_v2` (hashes from `definitionHash`) and a grant listing both. New invalid fixtures: mcp server prefix uppercase, builtin uppercase name, mcp name with a space, plus two grant fixtures (uppercase server prefix, space). The "tool part differs in case" case is a test, not a fixture, because the schema accepts it and only the code check rejects it. Tests also cover 128 characters (ok) versus 129 and outside characters (rejected), and the end-to-end allow case for both mixed-case tools with a matching registry entry.
+4. ADR-0007 addendum "Addendum 2026-11-27 (fix round 1)" appended; no earlier ADR text changed.
+5. Pushed to the same branch (see the task summary for the sha).
+
+## Counts and checks
+- `npm test` on Node 22.23.5: 786 tests, 786 pass, 0 fail, 0 skipped (includes `test/grant-adapter.test.js` and the acceptance suite).
+- `npm test` on Node 24.22.3: 786 tests, 786 pass, 0 fail, 0 skipped.
+- `npm run check:self-model` passes on both; `self-model.json` was not stale and is unchanged.
+- Guard `node .github/scripts/locked-paths.mjs 41a26ce <HEAD>`: "no locked paths touched". `git diff --name-only 41a26ce...HEAD` lists only the allowed paths.
+- Banned-token grep over the new and changed src, test and schema files: no hits.
+
+## Fixtures changed
+None of the round 1 fixtures was changed; all pass unchanged. Only new fixtures were added.
+
+## Registration limit
+A tool whose real name contains a character outside `[A-Za-z0-9_.-]`, or is longer than 128 characters, cannot be registered. Its manifest name would fail the schema, so it is refused (fail closed). A tool name that fits the pattern but is longer than 128 characters is refused the same way.
+
+## What the tests cannot prove
+That the host will actually pass the right `vocabulary` and `builtins` (the gateway does not call this code yet); the builtin list is only as trustworthy as the code that holds it. That real MCP servers' tool names, which are the server's own claims, fit the pattern. The grant name pattern is checked in the schema only; whether a granted name matches a live server's tool is not tested (no MCP code).
+
+## Interface gaps
+- `checkCapabilityAllowed` now has two required inputs besides grant, manifest, registry and now: `vocabulary` always, and `builtins` for builtin manifests. Callers that used it without them are denied.
+- `builtinKey` throws on a manifest that cannot be hashed (like `definitionHash`); `checkCapabilityAllowed` catches it and denies.
+- The builtin key uses the manifest's own `definition_hash` when present, so a builtin that sets it is identified by what it claims; a host that wants to bind to content should leave it unset and list the computed hash.

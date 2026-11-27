@@ -1,0 +1,28 @@
+{
+  "schema_version": "2",
+  "task_id": "task-0001",
+  "scope": {
+    "repos": [
+      "agent-core"
+    ],
+    "paths": [
+      "docs/"
+    ]
+  },
+  "budget": {
+    "max_usd": 0.5,
+    "max_tool_calls": 20
+  },
+  "expires_at": "2030-01-01T00:00:00Z",
+  "allowed_risk_tiers": [
+    "low",
+    "medium"
+  ],
+  "capabilities": [
+    {
+      "name": "Acme.getUser",
+      "definition_hash": "8cc9a5d4bed9d2eddc8560fdd16c7eb19a5077913117e43669a1120f031d0c67",
+      "max_calls": 1
+    }
+  ]
+}

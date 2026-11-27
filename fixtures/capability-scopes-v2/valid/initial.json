@@ -1,0 +1,8 @@
+{
+  "schema_version": "2",
+  "scopes": [
+    "repo:commit:task-branch",
+    "repo:read:task-worktree",
+    "repo:write:task-worktree"
+  ]
+}

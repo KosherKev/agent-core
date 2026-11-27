@@ -1,0 +1,6 @@
+{
+  "schema_version": "2",
+  "scopes": [
+    "Repo:read:task-worktree"
+  ]
+}

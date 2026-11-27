@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "capability-scopes-v2",
+  "title": "Capability scope vocabulary v2",
+  "description": "ADR-0007 D2. The closed vocabulary of resource:verb:boundary scopes. Kept by hand in config/. May be empty.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "scopes"],
+  "properties": {
+    "schema_version": { "const": "2" },
+    "scopes": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": { "type": "string", "pattern": "^[a-z][a-z0-9_-]*:[a-z][a-z0-9_-]*:[a-z][a-z0-9_-]*$" }
+    }
+  }
+}

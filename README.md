@@ -26,11 +26,12 @@ Seams 1-5 are contracts with schemas. Seams 6 and 7 are enforcement boundaries.
 ## Layout
 ```
 schemas/v1/       versioned JSON Schemas (draft 2020-12)
+schemas/v2/       capability contract v2 (ADR-0007): manifest, grant, trust registry, scope vocabulary; pure checks in src/capability-v2.js
 src/              validators, journal API, self-model generator
 fixtures/<name>/  valid/ and invalid/ examples per schema
 test/             unit tests
 acceptance/       LOCKED acceptance suite
-docs/adr/         one ADR per contract
+docs/adr/         ADRs; every contract is covered by at least one ADR (an ADR may cover several)
 .github/          CODEOWNERS, locked-paths list, guard workflow and tests workflow (LOCKED)
 scripts/          build-self-model.js
 self-model.json   generated; do not hand-edit

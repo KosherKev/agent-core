@@ -1,0 +1,37 @@
+{
+  "schema_version": "2",
+  "name": "invoice-draft",
+  "version": "1.0.0",
+  "origin": {
+    "kind": "builtin"
+  },
+  "scopes": [
+    "payments:draft:proposal"
+  ],
+  "inputs": [
+    {
+      "name": "amount_micro_usd",
+      "type": "integer",
+      "required": true
+    }
+  ],
+  "outputs": [
+    {
+      "name": "proposal",
+      "type": "object"
+    }
+  ],
+  "effect": "money",
+  "mode": "draft",
+  "risk_tier": "payments",
+  "network": {
+    "egress": "none"
+  },
+  "credentials": [],
+  "execution_identity": "agent_builder",
+  "undo": {
+    "reversal_steps": [
+      "Discard the draft proposal."
+    ]
+  }
+}
