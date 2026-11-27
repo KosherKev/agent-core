@@ -204,8 +204,10 @@ const deny = (reason) => ({ allowed: false, reason });
  * `vocabulary` is optional: when given, manifest scopes must be in it (step 1); when omitted the schema-level scope
  * pattern is the only scope check for a builtin manifest. Never throws.
  */
-export function checkCapabilityAllowed({ grant, manifest, registry, now, vocabulary } = {}) {
+export function checkCapabilityAllowed(args) {
   try {
+    if (args === null || typeof args !== 'object') return deny('input_invalid: expected an object { grant, manifest, registry, now }');
+    const { grant, manifest, registry, now, vocabulary } = args;
     const g = validateGrantV2(grant);
     if (!g.valid) return deny(`grant_invalid: ${g.errors.join('; ')}`);
     const m = vocabulary === undefined ? checkManifestCore(manifest) : validateManifestV2(manifest, { vocabulary });
