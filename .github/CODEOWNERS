@@ -33,3 +33,6 @@
 /test/gateway-store.test.js @KosherKev
 /test/gateway-tools.test.js @KosherKev
 /schemas/ @KosherKev
+/package.json @KosherKev
+/package-lock.json @KosherKev
+/scripts/ @KosherKev
