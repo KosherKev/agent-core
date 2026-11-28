@@ -1,5 +1,33 @@
 # LOG
 
+## 2026-11-27 (Gateway docs: record the VM proof and the new socket_dir default)
+- Task: gateway docs, record the VM proof and the new socket_dir default (docs only).
+- Branch: task/gateway-docs-vm-proof. Start sha: b427b392885b624c91af1122c9647ccd7e13b579 (origin/main has since moved to 808042a; I kept the start sha the spec named).
+- Pushed tip sha: see the task summary (a sha cannot be written into the commit that contains it).
+- Files changed: docs/gateway.md, LOG.md.
+
+### What was changed per edit
+1. "Socket directory" note: now says the default is `/run/agent-gateway` on Linux and `/var/run/agent-gateway` on macOS (since b427b39), that `/var/run` is a symlink to `/run` on Linux and doctor rejected the old default in VM run 1, and that the new Linux default ran with no `socket_dir` edit in VM run 2. The macOS setup section is untouched.
+2. Setup step 1: one sentence that `init` writes a placeholder `identities.runner_uid`, to be set with `id -u <runner>`, and that leaving it in was not tested.
+3. Proof record: the 2026-11-26 container record is kept; a "2026-11-27, VM" record was added with the environment, Run 1, Run 2 and the checksum table. The macOS value for b427b39 is marked not yet confirmed.
+4. Step 6b: the "run once in a container / VM re-run still required" note now points to both records; the 3b note carries the observed result (doctor rejected the impostor with and without 3b; connectability untested); the "one real run was in a container" sentence in item 4 now points to the Proof record.
+5. Limits: removed "container, not a VM" and "default socket_dir untested" from the container record's limits; the VM record lists the new limits from the spec.
+6. `<socket_dir>` placeholders and example literals `/run/agent-gateway` kept.
+
+### Anything that could not be placed
+- Nothing dropped. One tension: edit 3 says keep the container record unchanged, edit 5 says remove two limits that live inside it. I followed edit 5 for those two bullets only (its "Limits" list); the rest of that record is unchanged.
+- The spec's limit "the VM admin account has sudo while the runner does not" and "doctor cannot see sudo rules or setuid helpers" are stated as given, not re-verified.
+- Edit 4's replacement text is mine in wording only; the facts are the spec's.
+
+### Test result
+- `npm test` on Node 22.23.5: 787 tests, 787 pass, 0 fail. On Node 24.22.3: 787/787. `npm run check:self-model`: up to date. Locked-paths guard (b427b39 to HEAD): "no locked paths touched".
+- Greps of docs/gateway.md: `container, not a VM` and `not tested on Linux`: no hits. `/var/run/agent-gateway` remains in the Socket directory note (macOS default, the old Linux default), the macOS setup command and the VM run 1 record: all intentional.
+
+### Items left for Kevin
+- Confirm the macOS checksum for b427b39 and update the table.
+- Fix the stale comment in src/gateway/layout.js (locked, out of scope).
+- Open the PR.
+
 ## 2026-11-26 (Gateway round 6: stale durability docs, durable outcome line, release-path tests)
 Branch task/gateway-round-6, based on main 7aa93e0 (round 5 merge). Baseline 665 tests; after: 670 on Node 22.23.5 and 24.22.3. The reviewers' findings reached me second hand; each was checked in the code.
 
