@@ -63,7 +63,7 @@ id agentgw; id "$USER"                         # note the uids
 ```
 Observed in the proof: on Ubuntu 24.04, `useradd --create-home --home-dir /var/lib/agent-gateway` creates that directory as mode 0750 owned `agentgw:agentgw`. The proof run set it to 755 (`chmod 755 /var/lib/agent-gateway`) before the checks. `agent-home` inside it stays 0700, and its group is root with the `install -d -o agentgw -m 0700` above.
 
-**Socket directory.** These docs and the proof use `socket_dir` = `/run/agent-gateway` on Linux. `agent init` writes the default `/var/run/agent-gateway`; on Linux `/var/run` is a symlink to `/run`. That default was not tested on Linux, so set `socket_dir` explicitly in `config.json`.
+**Socket directory.** The `agent init` default for `socket_dir` is `/run/agent-gateway` on Linux and `/var/run/agent-gateway` on macOS (since b427b39). On Linux `/var/run` is a symlink to `/run`, and doctor rejects the old default `/var/run/agent-gateway` there (observed in the 2026-11-27 VM run 1: "trust anchor failed: /var/run on the path of socket_dir is a symbolic link (to /run)"). The new Linux default was run with no `socket_dir` edit in the 2026-11-27 VM re-run (see "Proof record").
 
 **Runner account requirement.** The runner account must have no root-equivalent access: no sudo rule, no `wheel` or `sudo` group membership, no `docker` group membership and no root-owned setuid helper it can run. Doctor cannot see any of these (see "What doctor can and cannot prove").
 Do not make `agentgw` a member of any group your own user shares other than `agent-runner`, and keep `/var/lib/agent-gateway` traversable (not 0700) or doctor cannot inspect `AGENT_HOME` (it then reports the denial, which still proves the boundary, but check (a) cannot read the mode).
@@ -97,7 +97,7 @@ The locked-set checksum (doctor check h) covers the locked files, not the interp
 
 ### Both
 Commands run as the gateway user use `sudo runuser -u agentgw --` (in the proof `sudo -u agentgw` prompted for a password, because sudoers allowed only `(root) NOPASSWD`, and `sudo runuser -u agentgw -- <cmd>` worked). `sudo -u agentgw` is the alternative where your sudoers allows it.
-1. As the gateway user create the config under its `AGENT_HOME`: `sudo runuser -u agentgw -- env AGENT_HOME=<agent-home> /opt/agent-core-node /opt/agent-core/bin/agent init`, then edit `config.json` as that user: real `identities.gateway_uid` / `runner_uid`, `socket_dir`, `runner_group`, and the provider (`providers.<name>.base_url`).
+1. As the gateway user create the config under its `AGENT_HOME`: `sudo runuser -u agentgw -- env AGENT_HOME=<agent-home> /opt/agent-core-node /opt/agent-core/bin/agent init`, then edit `config.json` as that user: real `identities.gateway_uid` / `runner_uid`, `socket_dir`, `runner_group`, and the provider (`providers.<name>.base_url`). `init` writes a placeholder `identities.runner_uid`; the operator must set it to the runner account's uid (`id -u <runner>`), as was done in the VM run. The effect of leaving the placeholder in was not tested.
 2. As the gateway user write the credential file (`credentials.json`, mode 0600, `{ "providers": { "<name>": "<key>" } }`). Never put a key anywhere else.
 3. Start it under the gateway user: `sudo runuser -u agentgw -- env AGENT_HOME=<agent-home> /opt/agent-core-node /opt/agent-core/bin/agent gateway`.
 
@@ -113,14 +113,14 @@ Run doctor as your normal user: never under `sudo` and never as the gateway user
 6. Negative checks (keep `AGENT_HOME` and `AGENT_GATEWAY_SOCKET` exported, run doctor as the normal user):
    - `sudo chmod 755 <agent-home>` then restart the gateway: it refuses to start ("AGENT_HOME mode is 755, it must be 700"). With the gateway down doctor cannot learn the layout from `ping`, so (a), (b), (c), (d), (e) and (f) all FAIL. A six-failure output is expected, not only (a) and (d). Restore 700 and restart the gateway.
    - `sudo runuser -u agentgw -- chmod 666 <socket_dir>/gateway.sock` (the socket as the gateway user): doctor (c) must fail with "socket mode is 666, it must be 660". Restore 660 (or restart the gateway).
-6b. Impostor check (replay). **This procedure was run once, in a container (see "Proof record"). A clean VM re-run with a runner that has no sudo and no docker group is still required before M1b depends on it.** `socket_dir` is 0750, so a normal user cannot bind there; only root or the gateway user can. A bare "answer ping with anything" fails (b) as "not a well-formed ping" and only (c) names the owner, so the impostor must replay a genuine ping reply to exercise all four trust-anchor reasons. `$SD` is your `socket_dir`. On Linux the commands below use `/opt/agent-core-node` (sudo's PATH may not include your own Node); on macOS substitute `node`.
+6b. Impostor check (replay). **This procedure was run in a container and again in a VM (see the 2026-11-26 and 2026-11-27 records under "Proof record").** `socket_dir` is 0750, so a normal user cannot bind there; only root or the gateway user can. A bare "answer ping with anything" fails (b) as "not a well-formed ping" and only (c) names the owner, so the impostor must replay a genuine ping reply to exercise all four trust-anchor reasons. `$SD` is your `socket_dir`. On Linux the commands below use `/opt/agent-core-node` (sudo's PATH may not include your own Node); on macOS substitute `node`.
    1. As the normal user, while the real gateway runs, capture a genuine ping reply:
       `/opt/agent-core-node -e "const {createConnection}=require('net');const c=createConnection(process.env.AGENT_GATEWAY_SOCKET);c.on('connect',()=>c.write(JSON.stringify({id:1,method:'ping',params:{}})+'\n'));c.on('data',d=>{require('fs').writeFileSync('/tmp/real-ping.json',d);c.end()})"`
    2. Stop the gateway (remove a stale socket file if left).
    3. As root, bind the same path and replay it:
       `sudo env AGENT_GATEWAY_SOCKET=$SD/gateway.sock /opt/agent-core-node -e "const net=require('net'),fs=require('fs');const real=fs.readFileSync('/tmp/real-ping.json','utf8').trim();net.createServer(c=>c.on('data',d=>{let id=1;try{id=JSON.parse(String(d).split('\n')[0]).id}catch{};const r=JSON.parse(real);r.id=id;c.write(JSON.stringify(r)+'\n')})).listen(process.env.AGENT_GATEWAY_SOCKET)"`
-   3b. The impostor socket must be mode 660 with group = the runner group, or the runner cannot even connect and doctor fails at "gateway did not answer" without reaching the trust-anchor checks. On macOS the new socket inherits the group of its directory. On Linux it gets the creator's group, so set it explicitly: `sudo chgrp <runner-group> $SD/gateway.sock && sudo chmod 660 $SD/gateway.sock` (Linux: run as written in the container proof and the impostor was then reachable; whether the explicit `chgrp` was strictly required was not tested).
-   4. As the normal user, `agent doctor --gateway-user <name>` must fail (b), (c), (d), (e), (f), each with a "trust anchor failed" reason (socket owned by uid 0, or discovery file missing). Since round 4 doctor sends nothing to the socket when a filesystem trust check fails, so this impostor is rejected before any ping and (a) also fails ("trust anchor failed"; it cannot learn a layout it refuses to ask for). This ordering is covered by fakes; the one real run was in a container (see "Proof record"). Then remove `/tmp/real-ping.json`, remove the impostor socket, and restart the real gateway.
+   3b. The impostor socket must be mode 660 with group = the runner group, or the runner cannot even connect and doctor fails at "gateway did not answer" without reaching the trust-anchor checks. On macOS the new socket inherits the group of its directory. On Linux it gets the creator's group, so set it explicitly: `sudo chgrp <runner-group> $SD/gateway.sock && sudo chmod 660 $SD/gateway.sock` (Linux: run as written in the container proof and the impostor was then reachable; whether the explicit `chgrp` was strictly required was not tested. In the 2026-11-27 VM run doctor rejected the impostor both with and without 3b applied; whether the runner could connect to the impostor socket in either state was not tested.)
+   4. As the normal user, `agent doctor --gateway-user <name>` must fail (b), (c), (d), (e), (f), each with a "trust anchor failed" reason (socket owned by uid 0, or discovery file missing). Since round 4 doctor sends nothing to the socket when a filesystem trust check fails, so this impostor is rejected before any ping and (a) also fails ("trust anchor failed"; it cannot learn a layout it refuses to ask for). This ordering is covered by fakes; the real runs are in the "Proof record". Then remove `/tmp/real-ping.json`, remove the impostor socket, and restart the real gateway.
 7. Run doctor as the gateway user (`sudo runuser -u agentgw -- env AGENT_HOME=<agent-home> AGENT_GATEWAY_SOCKET=<socket_dir>/gateway.sock /opt/agent-core-node /opt/agent-core/bin/agent doctor --gateway-user agentgw`): (d) must FAIL with "run doctor as the runner user".
 8. Only then lock `src/gateway/` by hand (add it to `.github/locked-paths.txt` and CODEOWNERS). M1a is not trusted until this passes. Done: `src/gateway/`, `bin/agent` and the gateway tests are now locked. The locked-set checksum recorded before locking (see "Proof record") differs from the one after.
 
@@ -137,9 +137,43 @@ Run doctor as your normal user: never under `sudo` and never as the gateway user
   - Step 6b: an impostor replaying a genuine ping, owned by root, `chgrp agent-runner`, mode 660, failed (a) to (f) with "the socket is owned by uid 0, not agentgw (uid 999)". The discovery file was also missing at that point (the real gateway removes it on shutdown), so two trust-anchor reasons fired together. Step 3b's `chgrp` and `chmod 660` were run as written and the impostor was then reachable; whether they were strictly required was not tested.
   - Step 7: doctor as the gateway user failed (d) with "run doctor as the runner user", failed (e) as a cascade, and printed the note that the run proves nothing about the runner boundary.
 - Limits:
-  - It ran in a container, not a VM. A clean VM re-run with a runner that has no sudo and no docker group is still required before M1b depends on it.
   - The proof's runner account (`codespace`) had passwordless sudo and was in the `docker` group, both root-equivalent. The proof therefore shows that kernel permissions deny an ordinary user; it does not show that the real runner account has no root path. Doctor cannot detect sudo, docker or wheel membership.
-  - `socket_dir` was `/run/agent-gateway`. Whether doctor's symlink check accepts the `agent init` default `/var/run/agent-gateway` was not tested.
+
+### 2026-11-27, VM
+Reported by Kevin's proof chat from a raw log on servermac (`~/agentproof-evidence.log`); not re-verified when this record was written.
+- Environment: host servermac (Intel Mac, macOS 13.7.8). VM: Lima 2.3.0, vmType vz, Ubuntu 24.04.5 LTS, kernel 6.8.0-147-generic, 2 CPU, 4 GiB, `systemd-detect-virt` = `apple`. Runner `agentrun` (uid 1001, groups agentrun and users, no sudo; `sudo -n true` fails with "a password is required"). Gateway user `agentgw` (uid 999), group `agent-runner` (gid 988). The VM's separate admin account has passwordless sudo. The gateway ran on Node v20.20.2 copied root-owned to `/opt/agent-core-node`. Audited copy in `/opt/agent-core`, root-owned, `npm ci --omit=dev --ignore-scripts`.
+- Run 1, commit 5d18296f735740db446a3666dfa0366207ef11be, default `socket_dir` `/var/run/agent-gateway`:
+  - Doctor as agentrun FAILED (a) through (f) with "trust anchor failed: /var/run on the path of socket_dir is a symbolic link (to /run)"; (g) and (h) passed.
+  - With `socket_dir` set to `/run/agent-gateway` (same directory on disk): all 8 checks passed, exit 0, over a real ssh login with a clean environment, not sudo.
+  - Step 3 modes: agent-home drwx------ agentgw, socket dir drwxr-x--- agentgw:agent-runner, socket srw-rw---- agentgw:agent-runner.
+  - Step 4: all five attempts "Permission denied".
+  - Step 6, agent-home 755: the gateway refused to start ("AGENT_HOME mode is 755, it must be 700"); doctor failed (a)-(f).
+  - Step 6, socket 666: doctor (c) failed "socket mode is 666, it must be 660". Two checks failed in total and only (c) was captured.
+  - Step 6b, impostor replay: (a)-(f) failed, reason "the socket is owned by uid 0, not agentgw (uid 999); the discovery file (gateway.json) cannot be inspected (ENOENT)".
+  - Step 3b: with the impostor socket at root:root 0755 (3b NOT applied) doctor already failed (a)-(f) with the same trust-anchor reason; after applying 3b (root:agent-runner 0660) the output was the same. Not tested: whether agentrun could connect to the impostor socket in either state.
+  - Step 7, doctor as the gateway user: (d) failed "doctor is running as uid 999 (the gateway identity); these probes proved nothing", fix "run doctor as the runner user"; (e) failed as a consequence; two failed in total.
+- Run 2, commit b427b392885b624c91af1122c9647ccd7e13b579 (PR #29):
+  - `agent init` as agentgw with no flags wrote `"socket_dir": "/run/agent-gateway"`.
+  - Edits after init (not to `socket_dir`): `identities.runner_uid` changed from init's placeholder 999 to 1001, and `credentials.json` written as `{"providers":{}}` mode 0600.
+  - Directory `/run/agent-gateway` created agentgw:agent-runner 0750.
+  - Doctor as agentrun, real ssh login: all 8 checks passed, exit 0.
+  - Whether doctor fails when the `runner_uid` placeholder is left in was NOT tested.
+- Locked-set checksum, check (h):
+
+| commit | locked files | Linux (VM) | macOS (servermac) |
+|---|---|---|---|
+| 5d18296 | 76 | `06e7695018e52106fdf801effe74a998b29d3d1b6be84dd47cdf9330eed07142` | `06e7695018e52106fdf801effe74a998b29d3d1b6be84dd47cdf9330eed07142` |
+| b427b39 | 76 | `88eb8cb2268203b0c9ff1a95e04886a8e4fc17edf59127d0bcf8f2efb748ff3d` | NOT yet confirmed (servermac install still at 5d18296) |
+
+  The earlier `47a52caeb7a09b80990d7c5b47b7ec1b8bc7aa94450324850b12598e183540fa` (30 files) predates the lock.
+- Limits:
+  - One VM, one run per commit, Intel host, vmType vz.
+  - The VM admin account has sudo; the runner does not.
+  - The gateway ran on Node v20.20.2.
+  - Behaviour when `/run/agent-gateway` is missing at boot is untested.
+  - Doctor cannot see sudo rules or setuid helpers.
+  - The run needed hand edits of `identities.runner_uid` and of the credentials file.
+  - The step 6 socket-666 capture recorded only (c).
 
 ## What doctor can and cannot prove
 **A doctor run by a compromised runner proves nothing.** The runner controls its own environment, its own copy of `agent` and anything that user can start, so a doctor it runs can be made to say anything. The proof is a human running `agent doctor --gateway-user <name>` from a clean login as the runner user, on a machine where `agent` itself is the audited copy.
