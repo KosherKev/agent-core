@@ -33,3 +33,6 @@ test/gateway-shutdown.test.js
 test/gateway-store.test.js
 test/gateway-tools.test.js
 schemas/
+package.json
+package-lock.json
+scripts/
